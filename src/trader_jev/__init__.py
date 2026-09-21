@@ -63,16 +63,6 @@ from trader_jev.portfolio import (
     PortfolioLedger,
     PortfolioPolicyConfig,
 )
-from trader_jev.risk import (
-    DeterministicRiskEngine,
-    FixedQuantityPortfolioPolicy,
-    RiskAuditRecord,
-    RiskConfig,
-    RiskEngine,
-    RiskLimits,
-    RiskProfileLimits,
-    RiskRuntimeState,
-)
 from trader_jev.replay import (
     PointInTimeViolation,
     ReplayConfig,
@@ -85,6 +75,16 @@ from trader_jev.replay import (
     merge_replay_events,
     validate_event_point_in_time,
     validate_prediction_metadata,
+)
+from trader_jev.risk import (
+    DeterministicRiskEngine,
+    FixedQuantityPortfolioPolicy,
+    RiskAuditRecord,
+    RiskConfig,
+    RiskEngine,
+    RiskLimits,
+    RiskProfileLimits,
+    RiskRuntimeState,
 )
 
 __all__ = [

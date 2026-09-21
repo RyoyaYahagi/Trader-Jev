@@ -43,10 +43,11 @@ def intent_for(snapshot: DecisionSnapshot, *, strategy_id: str = "risk-engine") 
 
 
 def paper_portfolio(**kwargs: Any) -> PortfolioState:
+    portfolio_kwargs: dict[str, Any] = {"cash": Decimal("100000")}
+    portfolio_kwargs.update(kwargs)
     return PortfolioState(
         portfolio_id="paper",
-        cash=Decimal("100000"),
-        **kwargs,
+        **portfolio_kwargs,
     )
 
 
@@ -195,6 +196,45 @@ def test_policy_and_metadata_errors_fail_closed(quote: QuoteEvent) -> None:
     decision = model_error.evaluate(intent_for(malformed_model), malformed_model, paper_portfolio())
     assert not decision.approved
     assert decision.reason_code == "MODEL_METADATA_INVALID"
+
+
+def test_cash_lot_spread_and_news_limits_are_enforced(quote: QuoteEvent) -> None:
+    snapshot = snapshot_for(quote)
+    cash_limited = DeterministicRiskEngine(
+        config=RiskConfig(enforce_cash=True),
+        clock=FixedClock(NOW),
+    )
+    decision = cash_limited.evaluate(
+        intent_for(snapshot),
+        snapshot,
+        paper_portfolio(cash=Decimal("1")),
+    )
+    assert not decision.approved
+    assert decision.reason_code == "INSUFFICIENT_CASH"
+
+    lot_instrument = quote.instrument.model_copy(update={"lot_size": 2})
+    lot_snapshot = snapshot.model_copy(update={"instrument": lot_instrument})
+    lot_engine = DeterministicRiskEngine(clock=FixedClock(NOW))
+    decision = lot_engine.evaluate(intent_for(lot_snapshot), lot_snapshot, paper_portfolio())
+    assert not decision.approved
+    assert decision.reason_code == "LOT_SIZE_VIOLATION"
+
+    spread_engine = DeterministicRiskEngine(
+        config=RiskConfig(max_spread_bps=Decimal("1")),
+        clock=FixedClock(NOW),
+    )
+    decision = spread_engine.evaluate(intent_for(snapshot), snapshot, paper_portfolio())
+    assert not decision.approved
+    assert decision.reason_code == "SPREAD_TOO_WIDE"
+
+    news_snapshot = snapshot.model_copy(update={"news": {"age_seconds": 10}})
+    news_engine = DeterministicRiskEngine(
+        config=RiskConfig(max_news_age_seconds=5),
+        clock=FixedClock(NOW),
+    )
+    decision = news_engine.evaluate(intent_for(news_snapshot), news_snapshot, paper_portfolio())
+    assert not decision.approved
+    assert decision.reason_code == "STALE_NEWS"
 
 
 def test_long_running_unique_decisions_have_no_duplicate_approvals(quote: QuoteEvent) -> None:

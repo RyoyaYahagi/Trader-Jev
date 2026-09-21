@@ -1,8 +1,10 @@
 # Architecture
 
-## 1. Non-negotiable boundary
+## 1. Current architecture
 
 ```text
+Historical / Replay Market Data
+       ↓
 MarketDataAdapter
        ↓
 Event / State Store
@@ -22,78 +24,88 @@ DecisionSnapshot
                             ↓
                         OrderIntent
                             ↓
-                       BrokerAdapter
+                         PaperBroker
                             ↓
-                  Order / Fill / Portfolio Ledger
+                  Virtual Fill / Portfolio Ledger
 ```
 
-DecisionModel, Jev, ML, News worker から Broker を直接呼ばない。
+現在は PaperBroker のみ実装対象。
 
-## 2. Core interfaces
+## 2. Broker API policy
+
+kabuステーションAPI / moomoo API は現在使用しない。
+
+実装してよいもの:
+- BrokerAdapter Protocol / ABC
+- PaperBroker
+- FakeBroker / test double
+
+実装してはいけないもの:
+- KabuStationBroker
+- MoomooBroker
+- broker authentication
+- account state sync
+- actual order endpoint
+- Shadow接続
+
+将来の具象Broker追加でCoreを壊さないinterfaceだけ維持する。
+
+## 3. Core interfaces
 
 ### MarketDataAdapter
 
-市場SDK/APIをcore eventへ正規化する。
+Historical file / dataset / replay sourceをcore eventへ正規化する。
 
-実装予定:
-
-- KabuStationMarketDataAdapter
-- JQuantsHistoricalAdapter
-- MoomooMarketDataAdapter
+Current:
 - ReplayMarketDataAdapter
+- File/HistoricalDataAdapter
+
+Future only:
+- realtime external feed adapters
 
 ### FeatureEngine
 
-Quote / Trade / OrderBook event を incremental に処理し、point-in-time features を生成する。
+Quote / Trade / OrderBook eventをincrementalに処理し、point-in-time featuresを生成する。
 
 ### PredictionModel
 
-任意コンポーネント。
+Optional。
 
 - LightGBM classifier
 - expected-return regressor
 - mock / baseline
 
-Jev-onlyでは利用しなくてよい。
-
 ### DecisionModel
-
-共通出力は TradeIntent。
-
-実装例:
 
 - RuleDecisionModel
 - JevDecisionModel
 - MLDecisionModel
 - JevWithMLDecisionModel
 
+共通出力はTradeIntent。
+
 ### NewsAdapter / NewsWorker
 
-ニュース取得・重複除去・銘柄紐付け・構造化を非同期に行う。
-
-Decision hot path は NewsState cache を読むだけにする。
+Optional。Broker APIへ依存させない。
 
 ### RiskEngine
 
-TradeIntent を OrderIntent に変換する唯一の権限境界。
+TradeIntentをOrderIntentへ変換する唯一の権限境界。
 
-fail closed。
+Paperでも必ずRiskEngineを通す。
 
 ### BrokerAdapter
 
+Current implementation:
 - PaperBroker
-- ShadowBroker
-- KabuStationBroker
-- MoomooBroker
+- FakeBroker
 
-Strategyは具象Brokerを知らない。
+Future interface only:
+- external live brokers
 
-## 3. Market abstraction
+## 4. Market abstraction
 
-日本株と米国株の共通Coreを維持し、市場固有情報は Instrument metadata と Adapter に閉じ込める。
-
-必要なmetadata例:
-
+InstrumentMetadata:
 - market
 - currency
 - timezone
@@ -104,32 +116,24 @@ Strategyは具象Brokerを知らない。
 - price_limit
 - symbol mapping
 
-10万円制約は Strategy ではなく PortfolioPolicy / RiskEngine が解釈する。
+10万円制約はStrategyではなくPortfolioPolicy / RiskEngineが解釈する。
 
-## 4. Decision loop
+## 5. Decision loop
 
-MVP:
+1. Replay/Event sourceからmarket eventを受信
+2. FeatureEngine更新
+3. 15秒cadence相当でDecisionSnapshot freeze
+4. data quality確認
+5. DecisionModel実行
+6. TradeIntent生成
+7. PortfolioPolicy + RiskEngine
+8. PaperBrokerへOrderIntent
+9. Virtual Fill / PortfolioをLedger保存
 
-1. Market eventsを継続受信
-2. FeatureEngineを更新
-3. 15秒ごとに対象10銘柄のDecisionSnapshotをfreeze
-4. data quality / freshnessを確認
-5. Rule/Jev/ML等のDecisionModelを実行
-6. TradeIntentを生成
-7. PortfolioPolicy + RiskEngineで注文可否/数量を決定
-8. BrokerAdapterへOrderIntentを渡す
-9. Order / Fill / Portfolioをledgerへ保存
+## 6. DecisionSnapshot
 
-Jev request は1 symbolごとに single-flight を基本とする。前回判断が未完了の場合の挙動は設定可能にするが、重複注文を発生させない。
-
-## 5. DecisionSnapshot
-
-Snapshot は immutable / versioned / serializable を目標にする。
-
-主要セクション:
-
-- identity: market / symbol / timestamps
-- market: bid / ask / mid / spread
+- market / symbol / timestamps
+- market state
 - technical
 - orderbook
 - orderflow
@@ -141,132 +145,86 @@ Snapshot は immutable / versioned / serializable を目標にする。
 - data_quality
 - schema_version
 
-Historical Replay と Live で同じschemaを使用する。
+## 7. Clocks and point-in-time
 
-## 6. Clocks and point-in-time
-
-System wall clockをstrategy logicから直接参照しない。
-
-- LiveClock
 - ReplayClock
+- TestClock
 
-を抽象化する。
+将来Realtimeを追加する場合のみLiveClockを追加してよい。
 
-すべての外部情報で、可能な限り以下を保持する。
+strategy logicからsystem wall clockを直接参照しない。
 
-- event_time / published_at
-- received_at / first_seen_at
+## 8. Storage
 
-Replayでは received_at / first_seen_at より未来の情報へアクセスできない。
+Raw:
+- append-only Parquet
 
-## 7. Storage
-
-### Raw market data
-
-- append-only
-- Parquet
-- date / market / symbol / event_type partitionを検討
-- schema versionを保存
-
-### Research query
-
+Query:
 - DuckDB
 
-### Operational state
+Operational:
+- SQLite等を許容
 
-MVPではSQLite等の軽量DBを許容する。必要性が出たらPostgreSQLへ移行する。
-
-### Audit ledger
-
-最低限以下を相互参照可能にする。
+Audit chain:
 
 ```text
 snapshot_id
-  → strategy/model version
+  → strategy/model
   → prediction
   → Jev request/response
   → TradeIntent
   → RiskDecision
   → OrderIntent
-  → broker order
-  → fills
+  → PaperBroker order
+  → virtual fills
   → portfolio state
   → realized outcome
 ```
 
-## 8. Paper portfolios
+## 9. Paper portfolios
 
-同じTradeIntent streamから複数PortfolioPolicyをforkできるようにする。
-
-例:
+同じTradeIntent streamから複数PortfolioPolicyへfork可能にする。
 
 - unconstrained
 - theoretical_100k
 - realistic_100k
-- max_positions_1
-- max_positions_3
-- max_positions_5
-- max_positions_10
+- max_positions 1 / 3 / 5 / 10
 - conservative / balanced / aggressive
 
-これにより、戦略判断を再実行せずPortfolio制約の差を比較できる設計を優先する。
+## 10. Execution modeling
 
-## 9. Execution modeling
-
-PaperBrokerは複数ExecutionModelを差し替え可能にする。
+PaperBrokerのExecutionModel:
 
 - Market
 - Limit
 - LimitThenMarket
-- simple touch fill baseline
+- touch fill baseline
 - volume-aware fill
-- L2 queue-aware fill（L2蓄積後）
+- L2 queue-aware fill（dataがある場合）
 
-fees / spread / latency / slippage はconfig化する。
-
-## 10. Exit orchestration
-
-ExitPolicyをDecisionModelから分離可能にする。
-
-- FixedTimeExit
-- StopLoss
-- TakeProfit
-- OppositeSignalExit
-- HybridExit
-
-最大保有5分を標準候補とし、fixed 5-minute exitをbaselineとして維持する。
+fees / spread / latency / slippageはconfig化。
 
 ## 11. Observability
 
-Structured logとmetricsに少なくとも以下を含める。
+run_id / snapshot_id / portfolio_id / market / symbol / strategy_id / model_version / risk reason / order/fill id を記録する。
 
-- run_id
-- snapshot_id
-- market
-- symbol
-- strategy_id
-- model_version
-- Jev latency
-- feed latency
-- risk reason
-- order/fill ids
-- portfolio id
+## 12. Test gates
 
-任意tradeについて「なぜ発注されたか」を後から辿れることを必須とする。
+docs/TEST_GATES.mdをarchitecture上の必須品質ゲートとする。
 
-## 12. Live safety
+特にGate 1〜3を通るまで、strategy profitabilityを信用しない。
 
-Liveは明示的にarmedされない限りBrokerへ送信不可。
+## 13. Future live extension
 
-推奨ゲート:
+将来Liveを検討する場合は別milestone / 別Issueで行う。
 
-```text
-LIVE_TRADING=true
-AND LIVE_ARMED=true
-AND account matches expected account
-AND symbol in allowlist
-AND RiskEngine healthy
-AND market/feed healthy
-```
+その時点で初めて:
+- broker選定
+- API調査
+- Shadow
+- account reconciliation
+- live arming
+- live risk
+を設計する。
 
-Jev / ML / Strategy の例外は fail closed とする。
+現在のcoding agentはこれらを実装してはいけない。

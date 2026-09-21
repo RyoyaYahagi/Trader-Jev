@@ -4,8 +4,39 @@ from __future__ import annotations
 
 import json
 import logging
+from collections.abc import Mapping
 from datetime import UTC, datetime
-from typing import Any
+from typing import Any, cast
+
+_SECRET_KEY_PARTS = frozenset(
+    {
+        "api_key",
+        "apikey",
+        "authorization",
+        "credential",
+        "password",
+        "secret",
+        "token",
+    }
+)
+
+
+def redact_sensitive(value: Any) -> Any:
+    """Return a JSON-safe value with credential-like fields removed."""
+
+    if isinstance(value, Mapping):
+        mapping = cast(Mapping[Any, Any], value)
+        return {
+            str(key): "[REDACTED]"
+            if any(part in str(key).lower().replace("-", "_") for part in _SECRET_KEY_PARTS)
+            else redact_sensitive(item)
+            for key, item in mapping.items()
+        }
+    if isinstance(value, list):
+        return [redact_sensitive(item) for item in cast(list[Any], value)]
+    if isinstance(value, tuple):
+        return tuple(redact_sensitive(item) for item in cast(tuple[Any, ...], value))
+    return value
 
 
 class JsonFormatter(logging.Formatter):
@@ -21,15 +52,17 @@ class JsonFormatter(logging.Formatter):
             "message": record.getMessage(),
         }
         payload.update(
-            {
-                key: value
-                for key, value in record.__dict__.items()
-                if key not in self._standard_fields and not key.startswith("_")
-            }
+            redact_sensitive(
+                {
+                    key: value
+                    for key, value in record.__dict__.items()
+                    if key not in self._standard_fields and not key.startswith("_")
+                }
+            )
         )
         if record.exc_info:
             payload["exception"] = self.formatException(record.exc_info)
-        return json.dumps(payload, default=str, ensure_ascii=False)
+        return json.dumps(redact_sensitive(payload), default=str, ensure_ascii=False)
 
 
 def configure_logging(level: int = logging.INFO) -> None:

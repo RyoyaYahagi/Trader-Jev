@@ -456,7 +456,14 @@ class DeterministicRiskEngine:
                 time_in_force=TimeInForce.DAY,
                 execution_mode=self._config.execution_mode,
                 created_at=now,
-                metadata={**intent.metadata, "entry_model": entry_model.value},
+                metadata={
+                    **intent.metadata,
+                    "entry_model": entry_model.value,
+                    "strategy_id": intent.strategy_id,
+                    "model_version": intent.model_version,
+                    "risk_profile": self._profile.value,
+                    "risk_reason": "APPROVED",
+                },
             )
         except Exception as exc:
             self._logger.exception(

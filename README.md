@@ -49,6 +49,7 @@ Jev を用いて、テクニカル・板・需給・ニュース・機械学習�
 5. [AGENT_GUIDE.md](docs/AGENT_GUIDE.md)
 6. [JEV_HTTP.md](docs/JEV_HTTP.md)（実Jev HTTP接続を使う場合）
 7. [ML.md](docs/ML.md)（ML学習・LightGBM・Paper利用）
+8. [JQUANTS.md](docs/JQUANTS.md)（J-Quants過去データ取得）
 
 GitHub Issue #1 をロードマップの起点とします。
 

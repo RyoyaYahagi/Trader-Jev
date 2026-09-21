@@ -80,7 +80,7 @@ def build_parser() -> argparse.ArgumentParser:
         type=Path,
         default=Path(".env"),
         help=(
-            "Optional JEV_*/TYPESAFE_API_KEY env file; process environment variables "
+            "Optional JEV_*/JQUANTS_*/TYPESAFE_API_KEY env file; process environment variables "
             "take precedence "
             "(default: .env)."
         ),
@@ -436,7 +436,7 @@ def _book_market_state(event: OrderBookEvent) -> MarketState:
 
 
 def load_env_file(path: Path) -> dict[str, str]:
-    """Load simple KEY=VALUE entries without printing or overriding the process env."""
+    """Load JEV/J-Quants KEY=VALUE entries without exposing or overriding secrets."""
 
     values = dict(os.environ)
     if not path.exists():
@@ -453,7 +453,7 @@ def load_env_file(path: Path) -> dict[str, str]:
             raise ValueError(f"env file line {line_number} must use KEY=VALUE")
         name, raw_value = line.split("=", 1)
         name = name.strip()
-        if not name.startswith("JEV_") and name != "TYPESAFE_API_KEY":
+        if not name.startswith(("JEV_", "JQUANTS_")) and name != "TYPESAFE_API_KEY":
             continue
         value = _parse_env_value(raw_value.strip(), line_number)
         values.setdefault(name, value)

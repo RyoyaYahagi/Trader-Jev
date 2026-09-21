@@ -12,7 +12,10 @@ from pathlib import Path
 from pydantic import Field
 
 from trader_jev.adapters import AdapterNormalizationError, FileMarketDataAdapter
+from trader_jev.cli import load_env_file
 from trader_jev.features import InMemoryFeatureEngine
+from trader_jev.interfaces import MarketDataAdapter
+from trader_jev.jquants import JQuantsMinuteBarAdapter
 from trader_jev.ml import (
     ChronologicalSplitConfig,
     LabelConfig,
@@ -57,12 +60,23 @@ async def run_training(args: argparse.Namespace) -> TrainingRunSummary:
         raise ValueError("--start must be earlier than --end")
 
     instrument = _build_instrument(args)
-    adapter = FileMarketDataAdapter(
-        args.data,
-        start=args.start,
-        end=args.end,
-        skip_corrupt_rows=not args.fail_on_corrupt,
-    )
+    if args.source == "jquants":
+        adapter: MarketDataAdapter = JQuantsMinuteBarAdapter.from_env(
+            load_env_file(args.env_file),
+            start=args.start,
+            end=args.end,
+        )
+        source_name = f"jquants:{instrument.symbol}"
+    else:
+        if args.data is None:
+            raise ValueError("--data is required when --source=file")
+        adapter = FileMarketDataAdapter(
+            args.data,
+            start=args.start,
+            end=args.end,
+            skip_corrupt_rows=not args.fail_on_corrupt,
+        )
+        source_name = str(args.data)
     snapshots = await _snapshots_from_market_data(adapter, instrument)
     if len(snapshots) < 2:
         raise ValueError("training requires at least two point-in-time snapshots")
@@ -110,7 +124,7 @@ async def run_training(args: argparse.Namespace) -> TrainingRunSummary:
     return TrainingRunSummary(
         model_type=args.model,
         model_version=model.model_version,
-        source=str(args.data),
+        source=source_name,
         snapshots=len(snapshots),
         examples=len(dataset.examples),
         train_examples=len(train),
@@ -122,7 +136,7 @@ async def run_training(args: argparse.Namespace) -> TrainingRunSummary:
 
 
 async def _snapshots_from_market_data(
-    adapter: FileMarketDataAdapter,
+    adapter: MarketDataAdapter,
     instrument: InstrumentMetadata,
 ) -> tuple[DecisionSnapshot, ...]:
     engine = InMemoryFeatureEngine()
@@ -162,10 +176,15 @@ def _build_model(args: argparse.Namespace) -> LightGBMBaseline | LogisticRegress
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="trader-jev-train",
-        description="Train a chronological ML artifact for Paper replay.",
+        description="Fetch historical data and train a chronological ML artifact for Paper replay.",
     )
+    parser.add_argument("--source", choices=("file", "jquants"), default="file")
+    parser.add_argument("--data", type=Path, help="CSV, JSONL, or NDJSON market data.")
     parser.add_argument(
-        "--data", type=Path, required=True, help="CSV, JSONL, or NDJSON market data."
+        "--env-file",
+        type=Path,
+        default=Path(".env"),
+        help="Env file for JQUANTS_API_KEY and JQUANTS_* settings (default: .env).",
     )
     parser.add_argument("--start", required=True, type=_timestamp, help="Replay start (ISO-8601).")
     parser.add_argument("--end", required=True, type=_timestamp, help="Replay end (ISO-8601).")

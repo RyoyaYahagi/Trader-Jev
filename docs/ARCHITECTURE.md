@@ -216,9 +216,9 @@ docs/TEST_GATES.mdをarchitecture上の必須品質ゲートとする。
 
 ## 13. Future live extension
 
-将来Liveを検討する場合は別milestone / 別Issueで行う。
+将来Liveへ進むことはプロジェクトの正式なロードマップに含む。ただし、Broker API integrationは現在のPaper milestoneとは分離し、Future milestone / deferred Issueで行う。
 
-その時点で初めて:
+Paper milestone完了後、その時点で初めて:
 - broker選定
 - API調査
 - Shadow
@@ -227,4 +227,4 @@ docs/TEST_GATES.mdをarchitecture上の必須品質ゲートとする。
 - live risk
 を設計する。
 
-現在のcoding agentはこれらを実装してはいけない。
+現在のPaper milestoneを担当するcoding agentはこれらを実装してはいけない。Future Live milestoneが明示的に開始された後は、この制約を更新して実装する。

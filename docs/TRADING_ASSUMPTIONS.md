@@ -1,0 +1,147 @@
+# Trading Assumptions
+
+現在合意済みの実験前提。
+
+## Current milestone
+
+**Paper-only。実取引APIは使用しない。**
+
+- kabuステーションAPI: 使用しない
+- moomoo API: 使用しない
+- 証券口座接続: しない
+- 実注文: しない
+- Shadow broker connection: しない
+- PaperBroker: 使用する
+
+## Markets
+
+- Japan equities
+- US equities
+
+共通Coreで扱う。
+
+Market dataはHistorical / Replayを優先し、Broker APIから取得しない。
+
+## Initial universe
+
+- 固定10銘柄
+- 流動性 + 業種分散 + 日中ボラティリティ
+- 月次見直しは後段
+- 10万円で1単元買えることを選定条件にしない
+
+## Timing
+
+- prediction horizon: 3〜5分
+- decision cadence: 15秒相当
+
+## Direction
+
+- LONG / SHORT / HOLD
+- PaperではLONG/SHORTを評価可能
+
+## Paper capital policies
+
+- Unconstrained
+- Theoretical-100k
+- Realistic-100k
+
+## Concurrent positions
+
+- 1 / 3 / 5 / 10
+
+## Position sizing
+
+1. equal allocation
+2. confidence-weighted
+3. risk-based
+
+## Entry
+
+- Market
+- Limit
+- LimitThenMarket
+
+## Exit
+
+Primary:
+- Hybrid
+
+Baseline:
+- fixed 5-minute
+
+Hybrid components:
+- stop-loss
+- take-profit
+- opposite signal
+- max holding 5 min
+
+## Jev
+
+Input:
+- latest features
+- short history summary
+- optional ML
+- optional NewsState
+- virtual portfolio state
+
+Confidence thresholdは事前固定しない。
+
+## ML
+
+Optional。
+
+Order:
+1. Rule
+2. Jev-only
+3. ML-only
+4. integrated
+
+Targets:
+- cost-adjusted UP / FLAT / DOWN
+- expected return bps
+
+## News
+
+1. none
+2. headline / short summary
+3. structured NewsState
+
+Broker API由来のnews sourceは現在使用しない。
+
+## Risk
+
+Paper:
+- Conservative
+- Balanced
+- Aggressive
+
+具体数値はPaper結果で調整。
+
+## Evaluation progression
+
+1. Historical Replay
+2. Paper E2E
+3. Long-running Forward Paper validation
+4. Dashboard / audit / reproducibility validation
+5. **Future milestone:** Shadow Live
+6. **Future milestone:** Minimum-size Live
+7. **Future milestone:** explicit expansion decision
+
+Live / Shadow / broker API integrationは将来実施する前提だが、現在のmilestoneでは未実装。
+
+## Test gates
+
+5つのGateをdocs/TEST_GATES.mdで定義する。
+
+Gateを通過せずに後続Phaseを「完了」にしない。
+
+## Still intentionally unresolved
+
+- specific 10 symbols
+- realtime non-broker data source
+- exact confidence threshold
+- exact stop/take-profit values
+- exact Paper minimum days/trades
+- exact Risk Profile numeric limits
+- when to enable pre-screening
+- PaperからFuture Live milestoneへ進む具体的な時期・定量ゲート

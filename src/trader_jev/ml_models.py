@@ -1,0 +1,51 @@
+"""Compatibility imports for baseline ML model consumers."""
+
+from trader_jev.integration import (
+    IntegrationMode,
+    JevMLDecisionModel,
+    JevWithMLDecisionModel,
+    MLDecisionConfig,
+    MLDecisionModel,
+    MLOnlyDecisionModel,
+)
+from trader_jev.ml import (
+    BaselineMLModel,
+    ChronologicalSplitConfig,
+    FeatureVectorizer,
+    LabelConfig,
+    LogisticRegressionBaseline,
+    MLModelConfig,
+    MLPredictionModel,
+    ModelArtifact,
+    TrainingDataset,
+    TrainingExample,
+    assert_no_future_leakage,
+    brier_score,
+    chronological_split,
+    expected_calibration_error,
+    walk_forward_splits,
+)
+
+__all__ = [
+    "BaselineMLModel",
+    "ChronologicalSplitConfig",
+    "FeatureVectorizer",
+    "IntegrationMode",
+    "JevMLDecisionModel",
+    "JevWithMLDecisionModel",
+    "LabelConfig",
+    "LogisticRegressionBaseline",
+    "MLDecisionConfig",
+    "MLDecisionModel",
+    "MLModelConfig",
+    "MLOnlyDecisionModel",
+    "MLPredictionModel",
+    "ModelArtifact",
+    "TrainingDataset",
+    "TrainingExample",
+    "assert_no_future_leakage",
+    "brier_score",
+    "chronological_split",
+    "expected_calibration_error",
+    "walk_forward_splits",
+]

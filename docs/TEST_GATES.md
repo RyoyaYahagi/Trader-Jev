@@ -4,7 +4,7 @@ Trader-Jevでは各Issueのunit/integration testに加えて、5つの明示的�
 
 **Gate未通過の状態で後続Phaseへ進まない。**
 
-現在はPaper-only milestoneであり、kabuステーションAPI / moomoo API / 実口座接続はテスト対象にも含めない。
+この5つは **現在のPaper milestone用Test Gates** である。kabuステーションAPI / moomoo API / 実口座接続は現在のテスト対象に含めない。将来Live milestoneを開始した際には、Shadow/Live専用の追加ゲートを別途設ける。
 
 ---
 
@@ -199,6 +199,12 @@ Current milestone完了時点でも:
 - broker account read = 0
 
 であること。
+
+### Relation to future Live
+
+Gate 5を通過しても、自動的にLiveへ進んではならない。
+
+Gate 5は「Paperシステムとして受け入れ可能」の意味であり、その後にFuture Live milestoneを明示的に開始して、Shadow Live / Broker API / reconciliation / idempotency / live riskの追加ゲートを実施する。
 
 ---
 

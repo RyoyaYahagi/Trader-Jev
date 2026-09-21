@@ -1,46 +1,59 @@
 # Trader-Jev
 
-Jev を用いて、テクニカル・板・需給・ニュース・機械学習予測を統合し、デイトレの最終意思決定を検証する研究・実装プロジェクトです。
+Jev を用いて、テクニカル・板・需給・ニュース・機械学習予測を統合し、デイトレ判断を仮想取引で検証する研究・実装プロジェクトです。
 
-最初から実売買を目的にせず、Historical Replay → Forward Paper Trading → Shadow Live → Minimum-size Live の順で段階的に検証します。
+## Current milestone: Paper-only
+
+現在の実装スコープは **Historical Replay + Paper Trading のみ** です。
+
+**kabuステーションAPI / moomoo API は現段階では使用しません。**
+
+禁止事項:
+
+- kabuステーションAPI SDK / endpoint の実装
+- moomoo API SDK / endpoint の実装
+- 証券口座への認証・接続
+- 実注文、Shadow注文、口座残高/position取得
+- Live Broker Adapter の具象実装
+
+将来の実売買へ拡張しやすい interface は維持してよいですが、現在のIssueでは外部Brokerへ接続しません。
 
 ## Project goals
 
-- Jev が短期売買判断に付加価値を持つか検証する
+- Jev が短期売買判断に付加価値を持つか仮想取引で検証する
 - Rule-based / Jev-only / ML-only / Jev+ML を同条件で比較する
-- 日本株と米国株で同じコア戦略を使える構成にする
-- Paper と Live で戦略コードを共通化する
-- Jev/ML の判断と、実際に注文してよいかを判定する Risk Engine を分離する
-- すべての判断・注文・約定を再現・監査可能にする
+- 日本株と米国株を共通Coreで扱える設計にする
+- 資金・単元・Risk・約定条件を変えたPaper Portfolioを比較する
+- すべての判断・仮想注文・仮想約定を再現・監査可能にする
+- 将来Brokerを追加してもStrategyを壊さない境界だけは維持する
 
 ## Initial scope
 
 - Prediction horizon: 3〜5分
 - Decision interval: 15秒
 - Initial universe: 固定10銘柄
-- Markets:
-  - Japan: kabuステーションAPI + J-Quants
-  - US: moomoo API
+- Markets: Japan / US を研究対象とする
 - Direction model: LONG / SHORT / HOLD
-- Initial Live: LONG only
-- Initial Live budget: 10万円以内
-- Main validation: Forward Paper Trading
+- Execution: PaperBroker only
+- Live trading: out of scope
+- Main validation: Historical Replay と Paper Trading
 
 ## Documents
 
 実装前に以下を読むこと。
 
-1. [PRODUCT_SPEC.md](docs/PRODUCT_SPEC.md) — 目的・実験設計・段階的ロードマップ
-2. [ARCHITECTURE.md](docs/ARCHITECTURE.md) — 責務境界とシステム構成
-3. [TRADING_ASSUMPTIONS.md](docs/TRADING_ASSUMPTIONS.md) — 売買条件・データ・Portfolio前提
-4. [AGENT_GUIDE.md](docs/AGENT_GUIDE.md) — コーディングエージェント向け実装規約
+1. [PRODUCT_SPEC.md](docs/PRODUCT_SPEC.md)
+2. [ARCHITECTURE.md](docs/ARCHITECTURE.md)
+3. [TRADING_ASSUMPTIONS.md](docs/TRADING_ASSUMPTIONS.md)
+4. [TEST_GATES.md](docs/TEST_GATES.md)
+5. [AGENT_GUIDE.md](docs/AGENT_GUIDE.md)
 
-実装ロードマップは GitHub Issue #1 を起点に管理します。
+GitHub Issue #1 をロードマップの起点とします。
 
 ## Core principle
 
 ```text
-Market Data
+Market Data / Replay Data
     ↓
 Feature Engine
     ↓
@@ -54,11 +67,15 @@ Deterministic Risk Engine
     ↓
 OrderIntent
     ↓
-BrokerAdapter
+PaperBroker
+    ↓
+Virtual Fill / Portfolio Ledger
 ```
 
-Jev や ML から Broker を直接呼び出してはいけません。
+Jev / ML / Strategy からPaperBrokerを直接呼び出してはいけません。
 
-## Safety
+## Test gates
 
-Live trading はデフォルト無効です。Paper で良い結果が出ても自動的に Live へ移行しません。Forward Paper、Shadow Live、最小サイズ Live の各ゲートを通過した場合のみ次段階へ進めます。
+次Phaseへ進む前に、docs/TEST_GATES.md の5つのTest Gateを通過すること。
+
+Gate未通過の状態で後続Issueを「完了」とみなさない。

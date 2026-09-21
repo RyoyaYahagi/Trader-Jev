@@ -1,45 +1,45 @@
 # Trading Assumptions
 
-この文書は現在合意済みの売買・実験前提をまとめる。数値未確定部分は、Paperデータから決定する。
+現在合意済みの実験前提。
 
-## Markets and rollout
+## Current milestone
 
-- 日本株と米国株を対象にする
-- 共通Coreを先に設計する
-- 実装順は日本株 → 米国株
-- 日本株 realtime/live: kabuステーションAPI
-- 日本株 historical/support: J-Quants
-- 米国株 realtime/live: moomoo API
+**Paper-only。実取引APIは使用しない。**
+
+- kabuステーションAPI: 使用しない
+- moomoo API: 使用しない
+- 証券口座接続: しない
+- 実注文: しない
+- Shadow broker connection: しない
+- PaperBroker: 使用する
+
+## Markets
+
+- Japan equities
+- US equities
+
+共通Coreで扱う。
+
+Market dataはHistorical / Replayを優先し、Broker APIから取得しない。
 
 ## Initial universe
 
-- Phase 1: 固定10銘柄
-- 選定: 流動性 + 業種分散 + 日中ボラティリティ
-- Phase 1では長期間固定して評価
-- その後は月次見直し
-- Expansion: 固定10 → 主要指数銘柄 → 動的選定
-- 10万円で1単元買えることを initial universe の選定条件にはしない
+- 固定10銘柄
+- 流動性 + 業種分散 + 日中ボラティリティ
+- 月次見直しは後段
+- 10万円で1単元買えることを選定条件にしない
 
 ## Timing
 
 - prediction horizon: 3〜5分
-- decision interval: 15秒
-- 初期は10銘柄すべてを毎回Jev評価
-- API負荷が問題なら後からpre-screeningを追加
+- decision cadence: 15秒相当
 
 ## Direction
 
-- Decision output: LONG / SHORT / HOLD
-- Paper: LONG/SHORTを評価可能
-- Initial Live: LONG only
+- LONG / SHORT / HOLD
+- PaperではLONG/SHORTを評価可能
 
-## Capital
-
-Initial Live budget:
-
-- <= 100,000 JPY equivalent
-
-Paper portfolio families:
+## Paper capital policies
 
 - Unconstrained
 - Theoretical-100k
@@ -47,164 +47,98 @@ Paper portfolio families:
 
 ## Concurrent positions
 
-Paper comparison:
-
-- max_positions = 1
-- max_positions = 3
-- max_positions = 5
-- max_positions = 10
-
-Initial Live:
-
-- max_positions = 1
+- 1 / 3 / 5 / 10
 
 ## Position sizing
 
-Stages:
-
 1. equal allocation
 2. confidence-weighted
-3. risk-based sizing for Live
-
-Confidence-weighted sizingはJev probability calibrationを確認後に利用する。
+3. risk-based
 
 ## Entry
 
-Paperで比較:
-
 - Market
 - Limit
-- Limit → timeout → Market
-
-Live方式はPaper/Shadow後に決定する。
+- LimitThenMarket
 
 ## Exit
 
 Primary:
-
-- Hybrid Exit
-
-Components:
-
-- max holding 5 min
-- stop-loss
-- take-profit
-- strong opposite signal
-- forced time exit
+- Hybrid
 
 Baseline:
+- fixed 5-minute
 
-- fixed 5-minute exit
-
-Stop/Take-profit rollout:
-
-1. fixed %
-2. ATR / realized volatility
-3. confidence-aware（後段）
+Hybrid components:
+- stop-loss
+- take-profit
+- opposite signal
+- max holding 5 min
 
 ## Jev
 
 Input:
-
 - latest features
 - short history summary
-- ML outputs after ML phase
-- NewsState after news phase
+- optional ML
+- optional NewsState
+- virtual portfolio state
 
-Confidence:
-
-- fixed thresholdを事前に決めない
-- Paperでthreshold / margin別に分析
+Confidence thresholdは事前固定しない。
 
 ## ML
 
-MLはoptional。
+Optional。
 
 Order:
-
 1. Rule
 2. Jev-only
 3. ML-only
 4. integrated
 
 Targets:
-
 - cost-adjusted UP / FLAT / DOWN
 - expected return bps
 
 ## News
 
-Rollout:
-
 1. none
 2. headline / short summary
 3. structured NewsState
 
-Sources:
-
-- Japan: free TDnet/public sources first
-- US: moomoo news
-- paid J-Quants TDnet is deferred until value is demonstrated
-
-## Historical data
-
-Stage 1:
-
-- 1-min / Tick
-
-Stage 2:
-
-- continuously record realtime L2
-
-Stage 3:
-
-- L2-aware historical replay after enough data accumulates
-
-Historical Jev results are reference-only because of possible training-data knowledge.
-
-## Forward Paper
-
-Primary Jev evaluation method.
-
-Live candidate requires all of:
-
-- minimum elapsed evaluation period
-- minimum trade count
-- multiple market regimes
-- acceptable execution/risk behavior
-
-Exact thresholds are not fixed yet.
+Broker API由来のnews sourceは現在使用しない。
 
 ## Risk
 
 Paper:
-
 - Conservative
 - Balanced
 - Aggressive
 
-Initial Live:
+具体数値はPaper結果で調整。
 
-- Conservative only
-
-## Live progression
+## Evaluation progression
 
 1. Historical Replay
-2. Forward Paper
-3. Shadow Live
-4. Minimum-size Live
-5. Expansion requires explicit later decision
+2. Paper E2E
+3. Long-running Paper validation
+4. Dashboard / audit / reproducibility validation
 
-Do not auto-promote between stages.
+Live / Shadow / broker API integrationは別milestone。
+
+## Test gates
+
+5つのGateをdocs/TEST_GATES.mdで定義する。
+
+Gateを通過せずに後続Phaseを「完了」にしない。
 
 ## Still intentionally unresolved
 
-以下は実測後に決定する。
-
-- specific initial 10 symbols
+- specific 10 symbols
+- realtime non-broker data source
 - exact confidence threshold
 - exact stop/take-profit values
-- exact Forward Paper minimum days/trades
-- exact Conservative/Balanced/Aggressive numeric limits
-- final Live entry order type
+- exact Paper minimum days/trades
+- exact Risk Profile numeric limits
 - when to enable pre-screening
+- whether/when to start a future Live milestone

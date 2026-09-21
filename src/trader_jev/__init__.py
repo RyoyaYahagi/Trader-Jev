@@ -1,6 +1,19 @@
 """Trader-Jev core domain and execution boundaries."""
 
 from trader_jev.clock import LiveClock, ReplayClock, SystemClock
+from trader_jev.comparison import (
+    ComparisonConfig,
+    ComparisonMetrics,
+    ComparisonOrchestrator,
+    ComparisonResult,
+    EntryComparison,
+    ExitComparison,
+    NewsVariant,
+    PortfolioVariant,
+    StrategySpec,
+    StrategyVariant,
+    VariantResult,
+)
 from trader_jev.dashboard import (
     AuditTrailStore,
     DashboardAPI,
@@ -134,6 +147,16 @@ __all__ = [
     "ExperimentReport",
     "ExperimentReportStore",
     "ForwardPaperProgress",
+    "ComparisonConfig",
+    "ComparisonMetrics",
+    "ComparisonOrchestrator",
+    "ComparisonResult",
+    "DecisionCadenceConfig",
+    "DecisionSnapshot",
+    "EntryModel",
+    "EntryComparison",
+    "ExecutionConfig",
+    "ExitComparison",
     "FillEvent",
     "HealthRegistry",
     "HealthState",
@@ -162,6 +185,7 @@ __all__ = [
     "NewsStateCache",
     "NewsWorkerConfig",
     "NewsWorkerService",
+    "NewsVariant",
     "NewsEvent",
     "OrderBookEvent",
     "OrderEvent",
@@ -170,6 +194,7 @@ __all__ = [
     "PaperBroker",
     "PaperExecutionConfig",
     "PaperPortfolioPolicy",
+    "PortfolioVariant",
     "PortfolioLedger",
     "PortfolioMetadata",
     "PortfolioPolicyConfig",
@@ -211,11 +236,14 @@ __all__ = [
     "SystemHealth",
     "TradeAuditTrail",
     "TradeRecord",
+    "StrategySpec",
+    "StrategyVariant",
     "available_news",
     "event_available_at",
     "merge_replay_events",
     "validate_event_point_in_time",
     "validate_prediction_metadata",
+    "VariantResult",
 ]
 
 __version__ = "0.1.0"

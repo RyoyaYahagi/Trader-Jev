@@ -293,7 +293,12 @@ class PaperBroker(BrokerAdapter):
         )
 
     def _entry_model(self, order: OrderIntent) -> EntryModel:
-        value = order.metadata.get("entry_model", self.config.entry_model.value)
+        default = (
+            EntryModel.LIMIT.value
+            if order.limit_price is not None
+            else self.config.entry_model.value
+        )
+        value = order.metadata.get("entry_model", default)
         try:
             return EntryModel(str(value))
         except ValueError:

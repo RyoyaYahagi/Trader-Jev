@@ -148,6 +148,34 @@ def test_partial_fill_and_portfolio_constraints(quote: QuoteEvent) -> None:
     assert quantity == 1000
 
 
+def test_short_close_latency_and_cancel_are_auditable(quote: QuoteEvent) -> None:
+    ledger = PortfolioLedger(PortfolioState(portfolio_id="paper", cash=Decimal("10000")))
+    broker = PaperBroker(
+        ExecutionConfig(latency_ms=5),
+        clock=FixedClock(NOW),
+        ledger=ledger,
+    )
+    broker.update_market(quote)
+    short_order = order_for(quote, quantity=2, action=Action.SHORT)
+    short_event = asyncio.run(broker.submit(short_order))
+
+    assert short_event.status is OrderStatus.FILLED
+    assert broker.fills[0].occurred_at == NOW + timedelta(milliseconds=5)
+    assert ledger.state.positions == {"TEST": -2}
+
+    long_order = order_for(quote, quantity=2, action=Action.LONG)
+    asyncio.run(broker.submit(long_order))
+    assert ledger.state.positions == {}
+    assert ledger.state.realized_pnl == Decimal("-2")
+
+    limit_broker = PaperBroker(clock=FixedClock(NOW))
+    limit_broker.update_market(quote)
+    pending_order = order_for(quote, limit_price=Decimal("99"))
+    assert asyncio.run(limit_broker.submit(pending_order)).status is OrderStatus.ACCEPTED
+    assert asyncio.run(limit_broker.cancel(pending_order)).status is OrderStatus.CANCELED
+    assert not limit_broker.pending_orders
+
+
 class E2EDecisionModel:
     async def decide(
         self,

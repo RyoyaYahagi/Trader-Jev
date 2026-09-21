@@ -2,9 +2,9 @@
 
 ## 1. Purpose
 
-Trader-Jev は、短期市場データを Jev で統合し、3〜5分程度のデイトレ判断に利用できるかを **仮想取引** で検証する研究基盤である。
+Trader-Jev は、短期市場データを Jev で統合し、3〜5分程度のデイトレ判断に利用できるかをまず **仮想取引** で検証し、十分な検証後に将来のShadow Live / Minimum-size Liveへ段階移行する研究・実装基盤である。
 
-現在の目的は実売買Botを作ることではない。
+現在のmilestoneでは実売買を実装しないが、将来Liveへ進む前提は維持する。
 
 評価対象:
 
@@ -21,7 +21,7 @@ Trader-Jev は、短期市場データを Jev で統合し、3〜5分程度の�
 
 現在のmilestoneでは外部Broker APIを使用しない。
 
-### Explicitly out of scope
+### Explicitly out of scope for the current milestone
 
 - kabuステーションAPI
 - moomoo API
@@ -31,7 +31,7 @@ Trader-Jev は、短期市場データを Jev で統合し、3〜5分程度の�
 - Live order送信
 - KabuStationBroker / MoomooBroker の具象実装
 
-将来拡張のため BrokerAdapter interface は保持してよいが、現在は PaperBroker のみ実装する。
+将来のLive milestoneで KabuStationBroker / MoomooBroker 等を追加する前提で BrokerAdapter interface は保持する。ただし現在は PaperBroker のみ実装する。
 
 Market data sourceはBroker APIに固定しない。Historical dataset / file / replay adapterを優先し、リアルタイム外部データ源は別途選定されるまで具象実装しない。
 
@@ -252,7 +252,23 @@ docs/TEST_GATES.md の5つのTest Gateを必須とする。
 
 後続Issueへ進む前に該当Gateを通過し、結果を記録する。
 
-## 19. Success criterion
+## 19. Long-term rollout
+
+Project roadmap:
+
+1. Historical Replay
+2. Paper E2E
+3. Long-running Forward Paper
+4. Paper System Acceptance
+5. **Future milestone:** Shadow Live
+6. **Future milestone:** Minimum-size Live
+7. **Future milestone:** explicit expansion decision
+
+将来Liveへ進む際には、Broker API integration / reconciliation / idempotency / live arming / live risk / kill switchを別の実装・テストゲートとして追加する。
+
+現在の5 Test GatesはPaper milestoneの品質ゲートであり、Live移行ゲートの代替ではない。
+
+## 20. Success criterion
 
 「利益が出た」だけでは成功としない。
 

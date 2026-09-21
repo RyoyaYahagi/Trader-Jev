@@ -54,7 +54,8 @@ def test_env_file_does_not_override_process_environment(
 ) -> None:
     env_file = tmp_path / ".env"
     env_file.write_text(
-        "JEV_API_KEY=file-key\nJEV_BASE_URL=https://file.example\n",
+        "JEV_API_KEY=file-key\nTYPESAFE_API_KEY=typesafe-file-key\n"
+        "JEV_BASE_URL=https://file.example\n",
         encoding="utf-8",
     )
     monkeypatch.setenv("JEV_API_KEY", "process-key")
@@ -62,6 +63,7 @@ def test_env_file_does_not_override_process_environment(
     values = load_env_file(env_file)
 
     assert values["JEV_API_KEY"] == "process-key"
+    assert values["TYPESAFE_API_KEY"] == "typesafe-file-key"
     assert values["JEV_BASE_URL"] == "https://file.example"
 
 

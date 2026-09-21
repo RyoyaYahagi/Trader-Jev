@@ -73,7 +73,8 @@ def build_parser() -> argparse.ArgumentParser:
         type=Path,
         default=Path(".env"),
         help=(
-            "Optional JEV_* env file; process environment variables take precedence "
+            "Optional JEV_*/TYPESAFE_API_KEY env file; process environment variables "
+            "take precedence "
             "(default: .env)."
         ),
     )
@@ -160,7 +161,7 @@ async def run_paper(
     env = load_env_file(args.env_file)
     jev_client = client or JevHttpClient.from_env(env)
     jev_timeout = 5.0
-    jev_model = "jev-paper"
+    jev_model = "jev-latest"
     if isinstance(jev_client, JevHttpClient):
         jev_timeout = jev_client.config.timeout_seconds
         jev_model = jev_client.config.model
@@ -388,7 +389,7 @@ def load_env_file(path: Path) -> dict[str, str]:
             raise ValueError(f"env file line {line_number} must use KEY=VALUE")
         name, raw_value = line.split("=", 1)
         name = name.strip()
-        if not name.startswith("JEV_"):
+        if not name.startswith("JEV_") and name != "TYPESAFE_API_KEY":
             continue
         value = _parse_env_value(raw_value.strip(), line_number)
         values.setdefault(name, value)

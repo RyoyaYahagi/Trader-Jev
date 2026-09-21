@@ -1,6 +1,16 @@
 """Trader-Jev core domain and execution boundaries."""
 
 from trader_jev.clock import LiveClock, ReplayClock, SystemClock
+from trader_jev.decision import (
+    DecisionCadenceConfig,
+    JevAdapterConfig,
+    JevDecision,
+    JevDecisionAdapter,
+    JevDecisionModel,
+    JevRequest,
+    RuleDecisionModel,
+    SingleFlightDecisionRunner,
+)
 from trader_jev.execution import ExecutionConfig, PaperBroker, PaperExecutionConfig
 from trader_jev.models import (
     Action,
@@ -47,11 +57,17 @@ __all__ = [
     "Action",
     "BarEvent",
     "CapitalPolicy",
+    "DecisionCadenceConfig",
     "DecisionSnapshot",
     "EntryModel",
     "ExecutionConfig",
     "FillEvent",
     "InstrumentMetadata",
+    "JevAdapterConfig",
+    "JevDecision",
+    "JevDecisionAdapter",
+    "JevDecisionModel",
+    "JevRequest",
     "NewsEvent",
     "OrderBookEvent",
     "OrderEvent",
@@ -65,6 +81,8 @@ __all__ = [
     "QuoteEvent",
     "RiskDecision",
     "RiskProfile",
+    "RuleDecisionModel",
+    "SingleFlightDecisionRunner",
     "TradeEvent",
     "TradeIntent",
     "FixedTimeExitPolicy",

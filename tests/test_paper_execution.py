@@ -5,7 +5,7 @@ from datetime import timedelta
 from decimal import Decimal
 from typing import Any
 
-from trader_jev.clock import FixedClock
+from trader_jev.clock import FixedClock, ReplayClock
 from trader_jev.execution import ExecutionConfig, PaperBroker
 from trader_jev.features import InMemoryFeatureEngine
 from trader_jev.models import (
@@ -20,12 +20,13 @@ from trader_jev.models import (
     QuoteEvent,
     TradeIntent,
 )
-from trader_jev.pipeline import TradingPipeline
+from trader_jev.pipeline import PipelineResult, TradingPipeline
 from trader_jev.portfolio import (
     PaperPortfolioPolicy,
     PortfolioLedger,
     PortfolioPolicyConfig,
 )
+from trader_jev.replay import ReplayConfig, ReplayEngine
 from trader_jev.risk import DeterministicRiskEngine, FixedQuantityPortfolioPolicy
 
 from .conftest import NOW
@@ -209,7 +210,20 @@ def test_replay_decision_risk_paper_fill_and_portfolio_e2e(quote: QuoteEvent) ->
         clock=FixedClock(NOW),
     )
 
-    result = asyncio.run(pipeline.process_event(quote, ledger.state))
+    replay = ReplayEngine(
+        [quote],
+        clock=ReplayClock(),
+        config=ReplayConfig(start=NOW, end=NOW + timedelta(seconds=1), speed="max"),
+    )
+
+    async def run_replay() -> PipelineResult:
+        results: list[PipelineResult] = []
+        async for event in replay.replay():
+            if isinstance(event, QuoteEvent):
+                results.append(await pipeline.process_event(event, ledger.state))
+        return results[0]
+
+    result = asyncio.run(run_replay())
 
     assert result.failure_code is None
     assert result.order_event is not None

@@ -8,25 +8,42 @@ Before implementing any issue, read:
 2. docs/PRODUCT_SPEC.md
 3. docs/ARCHITECTURE.md
 4. docs/TRADING_ASSUMPTIONS.md
-5. target GitHub Issue
+5. docs/TEST_GATES.md
+6. target GitHub Issue
 
-Do not implement an issue in isolation from these documents.
+Do not implement an issue in isolation.
+
+## Current scope is Paper-only
+
+This rule is mandatory.
+
+Do NOT:
+
+- implement or call kabuステーションAPI
+- implement or call moomoo API
+- add KabuStationBroker / MoomooBroker
+- authenticate to a brokerage account
+- read real brokerage positions/orders/balances
+- submit real orders
+- implement Shadow broker connectivity
+- add live-order arming logic as executable functionality
+
+You may define generic interfaces that make a future live adapter possible, but only PaperBroker/FakeBroker are implemented now.
+
+If an issue or old comment conflicts with this rule, this document and the latest issue text take precedence.
 
 ## Architecture invariants
 
 Never:
 
-- call Broker directly from Jev / ML / DecisionModel
-- hide market-specific SDK types inside core domain objects
+- call PaperBroker directly from Jev / ML / DecisionModel
 - use future information in Replay
-- silently fall back from prohibited LONG to SHORT or vice versa
-- place Live orders on model/API/data errors
-- enable Live by default
-- hard-code experimental thresholds that are intentionally unresolved in TRADING_ASSUMPTIONS.md
+- hide external SDK types inside core domain objects
+- silently reverse prohibited actions
+- bypass RiskEngine
+- hard-code unresolved experimental thresholds
 
 ## Coding standards
-
-Default stack:
 
 - Python 3.12
 - uv
@@ -37,38 +54,49 @@ Default stack:
 - pytest
 - Ruff
 - pyright
-- FastAPI where an API is needed
+- FastAPI where needed
 
 Maintain:
 
 - unit tests
-- integration tests for adapters
+- integration tests
 - deterministic replay tests
-- typed public interfaces
+- typed interfaces
 - structured logging
 - explicit config
-- no secrets in source/logs
+- no secrets
+
+## Mandatory Test Gates
+
+docs/TEST_GATES.md defines 5 mandatory gates.
+
+Rules:
+
+1. Each issue still needs its own unit/integration tests.
+2. A Test Gate is broader than an issue's tests.
+3. Do not proceed past a gate boundary while the gate is failing.
+4. Record the command/config/dataset/commit used for gate verification.
+5. A profitable strategy result does not override a failed data/replay/execution gate.
 
 ## Decision process
 
-If an issue leaves a local implementation detail unspecified, choose the simplest implementation consistent with the docs.
+If a local implementation detail is unspecified, choose the simplest design consistent with docs.
 
-If a choice would materially change architecture, trading assumptions, data semantics, or Live safety:
+If a choice changes architecture, data semantics, trading assumptions, or future live safety:
 
-1. do not silently decide it
-2. document the proposed change
-3. add/update an ADR or issue note
-4. keep the default behavior conservative
+1. do not silently decide
+2. document proposal
+3. update ADR/issue
+4. preserve Paper-only behavior
 
 ## Definition of done
 
-An implementation is not complete only because it runs.
-
-It must also:
+Implementation must:
 
 - satisfy issue acceptance criteria
-- have tests for failure modes
-- preserve replay determinism where applicable
-- emit enough metadata for later audit
+- pass issue-level tests
+- pass the relevant Test Gate when reaching a gate boundary
+- preserve replay determinism
+- emit audit metadata
 - avoid future leakage
-- keep Live disabled unless explicitly armed
+- never require a brokerage API in current milestone

@@ -101,6 +101,29 @@ def test_comparison_config_hash_changes_with_fairness_assumptions(quote: QuoteEv
     assert base.config_hash != changed.config_hash
 
 
+def test_all_research_strategy_slots_share_the_same_comparison_interface(
+    quote: QuoteEvent,
+) -> None:
+    signal = CountingSignal()
+    config = ComparisonConfig(
+        run_id="all-strategies",
+        data_id="fixture",
+        strategy_variants=tuple(StrategyVariant),
+    )
+    result = asyncio.run(
+        ComparisonOrchestrator(
+            config,
+            strategies=tuple(
+                StrategySpec(variant, variant.value.lower(), signal)
+                for variant in StrategyVariant
+            ),
+            portfolios=(PortfolioVariant(portfolio_id="paper"),),
+        ).run((quote,))
+    )
+    assert {variant.strategy_variant for variant in result.variants} == set(StrategyVariant)
+    assert all(variant.metrics.decision_count == 1 for variant in result.variants)
+
+
 def test_comparison_filter_keeps_same_market_event_range(quote: QuoteEvent) -> None:
     signal = CountingSignal()
     config = ComparisonConfig(

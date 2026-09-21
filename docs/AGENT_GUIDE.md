@@ -13,9 +13,9 @@ Before implementing any issue, read:
 
 Do not implement an issue in isolation.
 
-## Current scope is Paper-only
+## Current scope is Paper-only; future Live is planned
 
-This rule is mandatory.
+The project is designed to reach Live trading in a later milestone. This rule applies only to the **current Paper milestone** and is mandatory until the Future Live milestone is explicitly started.
 
 Do NOT:
 
@@ -28,7 +28,7 @@ Do NOT:
 - implement Shadow broker connectivity
 - add live-order arming logic as executable functionality
 
-You may define generic interfaces that make a future live adapter possible, but only PaperBroker/FakeBroker are implemented now.
+You should preserve generic interfaces that make future Live adapters possible, because Shadow/Live is part of the long-term roadmap. However, only PaperBroker/FakeBroker are implemented in the current milestone.
 
 If an issue or old comment conflicts with this rule, this document and the latest issue text take precedence.
 
@@ -87,7 +87,7 @@ If a choice changes architecture, data semantics, trading assumptions, or future
 1. do not silently decide
 2. document proposal
 3. update ADR/issue
-4. preserve Paper-only behavior
+4. preserve Paper-only behavior for the current milestone while keeping future Live extensibility
 
 ## Definition of done
 

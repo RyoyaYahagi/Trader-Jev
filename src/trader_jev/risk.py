@@ -13,6 +13,7 @@ from trader_jev.models import (
     Action,
     DecisionSnapshot,
     DomainModel,
+    EntryModel,
     ExecutionMode,
     OrderIntent,
     OrderType,
@@ -179,15 +180,25 @@ class DeterministicRiskEngine:
             return reject("MAX_ORDER_NOTIONAL", "order notional exceeds the configured limit")
 
         try:
+            entry_model_value = intent.metadata.get("entry_model", EntryModel.MARKET.value)
+            try:
+                entry_model = EntryModel(str(entry_model_value))
+            except ValueError:
+                entry_model = EntryModel.MARKET
+            order_type = (
+                OrderType.LIMIT if entry_model is not EntryModel.MARKET else OrderType.MARKET
+            )
             order = OrderIntent(
                 source_trade_intent_id=intent.intent_id,
                 instrument=intent.instrument,
                 side=intent.action,
                 quantity=quantity,
-                order_type=OrderType.MARKET,
+                order_type=order_type,
+                limit_price=intent.limit_price,
                 time_in_force=TimeInForce.DAY,
                 execution_mode=self._config.execution_mode,
                 created_at=now,
+                metadata={**intent.metadata, "entry_model": entry_model.value},
             )
         except Exception as exc:
             self._logger.exception(
@@ -215,8 +226,8 @@ class DeterministicRiskEngine:
         )
 
     def _quantity_for(self, intent: TradeIntent, portfolio: PortfolioState) -> int:
+        if self._portfolio_policy is not None:
+            return self._portfolio_policy.quantity_for(intent, portfolio)
         if intent.requested_quantity is not None:
             return intent.requested_quantity
-        if self._portfolio_policy is None:
-            raise ValueError("no portfolio policy and trade intent has no requested quantity")
-        return self._portfolio_policy.quantity_for(intent, portfolio)
+        raise ValueError("no portfolio policy and trade intent has no requested quantity")

@@ -126,6 +126,24 @@ class TimeInForce(StrEnum):
     FOK = "FOK"
 
 
+class EntryModel(StrEnum):
+    MARKET = "MARKET"
+    LIMIT = "LIMIT"
+    LIMIT_THEN_MARKET = "LIMIT_THEN_MARKET"
+
+
+class CapitalPolicy(StrEnum):
+    UNCONSTRAINED = "UNCONSTRAINED"
+    THEORETICAL_100K = "THEORETICAL_100K"
+    REALISTIC_100K = "REALISTIC_100K"
+
+
+class RiskProfile(StrEnum):
+    CONSERVATIVE = "CONSERVATIVE"
+    BALANCED = "BALANCED"
+    AGGRESSIVE = "AGGRESSIVE"
+
+
 class OrderStatus(StrEnum):
     ACCEPTED = "ACCEPTED"
     REJECTED = "REJECTED"
@@ -181,6 +199,12 @@ def _aware(value: datetime) -> datetime:
     if value.tzinfo is None or value.utcoffset() is None:
         raise ValueError("datetime must be timezone-aware")
     return value
+
+
+def _aware_or_none(value: datetime | None) -> datetime | None:
+    if value is None:
+        return None
+    return _aware(value)
 
 
 class EventModel(DomainModel):
@@ -386,6 +410,16 @@ class PortfolioState(DomainModel):
     open_orders: int = Field(default=0, ge=0)
     daily_pnl: Decimal = Decimal("0")
     drawdown: Decimal = Field(default=Decimal("0"), ge=Decimal("0"))
+    initial_capital: Decimal = Field(default=Decimal("0"), ge=Decimal("0"))
+    equity: Decimal | None = Field(default=None, ge=Decimal("0"))
+    realized_pnl: Decimal = Decimal("0")
+    unrealized_pnl: Decimal = Decimal("0")
+    average_prices: Mapping[str, Decimal] = Field(default_factory=dict)
+    mark_prices: Mapping[str, Decimal] = Field(default_factory=dict)
+    position_entry_times: Mapping[str, datetime] = Field(default_factory=dict)
+    updated_at: datetime | None = None
+
+    _portfolio_time_aware = field_validator("updated_at")(_aware_or_none)
 
 
 class OrderIntent(DomainModel):
@@ -401,6 +435,7 @@ class OrderIntent(DomainModel):
     time_in_force: TimeInForce = TimeInForce.DAY
     execution_mode: ExecutionMode = ExecutionMode.PAPER
     created_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
+    metadata: Mapping[str, Any] = Field(default_factory=dict)
 
     _order_time_aware = field_validator("created_at")(_aware)
 
@@ -431,6 +466,10 @@ class OrderEvent(DomainModel):
     occurred_at: datetime
     broker_order_id: str | None = None
     reason: str | None = None
+    quantity: int | None = Field(default=None, gt=0)
+    instrument: InstrumentMetadata | None = None
+    side: Action | None = None
+    metadata: Mapping[str, Any] = Field(default_factory=dict)
 
     _order_event_time_aware = field_validator("occurred_at")(_aware)
 
@@ -443,6 +482,11 @@ class FillEvent(DomainModel):
     quantity: int = Field(gt=0)
     fees: Decimal = Field(default=Decimal("0"), ge=Decimal("0"))
     broker_fill_id: str | None = None
+    instrument: InstrumentMetadata | None = None
+    side: Action | None = None
+    slippage: Decimal = Decimal("0")
+    liquidity: str | None = None
+    metadata: Mapping[str, Any] = Field(default_factory=dict)
 
     _fill_time_aware = field_validator("occurred_at")(_aware)
 

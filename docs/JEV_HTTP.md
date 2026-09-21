@@ -1,7 +1,7 @@
 # Jev HTTP接続設定
 
 現在のコアは `JevClient` Protocolだけを要求し、HTTP transportには依存しません。
-実際のJev APIへ接続するときは、追加した `JevHttpClient` を使います。
+TypeSafe AI の System One APIへ接続するときは、追加した `JevHttpClient` を使います。
 
 ## 設定
 
@@ -13,22 +13,21 @@ source .env
 set +a
 ```
 
-必須項目は次の2つです。
+必須項目はAPIキーです。TypeSafeのAPIホストとエンドポイントは既定値に含まれています。
 
 - `JEV_API_KEY`: APIキー
-- `JEV_BASE_URL`: `https://...` 形式のAPIベースURL
+- `TYPESAFE_API_KEY`: TypeSafe公式ドキュメントの環境変数名。`JEV_API_KEY` の代わりに使用可能
 
-`JEV_BASE_URL` はJev提供元のAPIドキュメントまたは管理画面に記載された
-「API Base URL」です。Web画面のURLやAPIキー発行画面のURLではありません。
-このリポジトリから提供元固有のURLを推測することはできないため、提供元の仕様に
-合わせて設定してください。
+`JEV_BASE_URL` は上書き用の任意項目です。TypeSafeを使う場合の既定値は
+`https://api.typesafe.ai` です。
 
 任意項目の既定値は次のとおりです。
 
 | 変数 | 既定値 | 用途 |
 | --- | --- | --- |
-| `JEV_ENDPOINT_PATH` | `/v1/decisions` | POST先のパス |
-| `JEV_MODEL` | `jev-paper` | リクエストに含めるモデル名 |
+| `JEV_BASE_URL` | `https://api.typesafe.ai` | APIホスト |
+| `JEV_ENDPOINT_PATH` | `/v1/systemone` | POST先のパス |
+| `JEV_MODEL` | `jev-latest` | リクエストに含めるモデル名 |
 | `JEV_TIMEOUT_SECONDS` | `5` | HTTPタイムアウト |
 | `JEV_MAX_RESPONSE_BYTES` | `65536` | 応答サイズ上限 |
 | `JEV_API_KEY_HEADER` | `Authorization` | APIキーを送るヘッダー |
@@ -41,7 +40,8 @@ JEV_API_KEY_HEADER=X-API-Key
 JEV_API_KEY_SCHEME=
 ```
 
-`.env` の自動読み込みは行いません。Docker、CI、シェル、プロセスマネージャーなどから環境変数として渡してください。
+ライブラリは `.env` を自動読み込みしません。Docker、CI、シェル、プロセスマネージャーなどから環境変数として渡してください。
+Paper CLIだけは `--env-file`（既定値 `.env`）で簡易な `KEY=VALUE` ファイルを読み込めます。
 
 ## Pythonからの利用
 
@@ -53,11 +53,12 @@ client = JevHttpClient.from_env()
 adapter = JevDecisionAdapter(client)
 ```
 
-クライアントは `JevRequest` をJSON化してPOSTし、JSON応答を既存の
-`JevDecisionAdapter` に渡します。応答が不正、タイムアウト、HTTPエラーの場合は、既存のfail-closed動作によりHOLDになります。
+クライアントは `JevRequest` の状態を TypeSafe の `state` にまとめ、`model` と typed
+questions（Choice、Score、Noul）を付けて `/v1/systemone` へPOSTします。TypeSafeの
+`answers` は既存の `JevDecision`（action、direction、regime、setup quality、確率、confidence）へ変換されます。
+応答が不正、タイムアウト、HTTPエラーの場合は、既存のfail-closed動作によりHOLDになります。
 
-実際のJevサービスが別のパス、認証方式、リクエスト形状を要求する場合は、上記の設定値または専用の `JevClient` 実装を調整してください。
-
+TypeSafeのAPIキーは `Authorization: Bearer <API_KEY>` ヘッダーで送信します。
 APIキーはURL・リクエスト本文・監査レスポンス・エラーメッセージに含めません。
 
 ## Paper実行CLI
@@ -72,6 +73,7 @@ uv run trader-jev-paper \
   --start 2026-09-21T09:00:00+09:00 \
   --end 2026-09-21T09:05:00+09:00 \
   --symbol TEST \
+  --max-events 1 \
   --lot-size 1 \
   --quantity 1
 ```

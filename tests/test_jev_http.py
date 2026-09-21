@@ -4,6 +4,7 @@ import inspect
 import json
 from collections.abc import Mapping
 from datetime import UTC, datetime
+from decimal import Decimal
 from typing import Any
 from urllib.request import Request
 from uuid import uuid4
@@ -36,12 +37,17 @@ class FakeResponse:
         return self.body[:limit]
 
 
-def test_from_env_requires_key_and_base_url() -> None:
-    with pytest.raises(ValueError, match="JEV_API_KEY is required"):
+def test_from_env_requires_api_key() -> None:
+    with pytest.raises(ValueError, match=r"JEV_API_KEY \(or TYPESAFE_API_KEY\) is required"):
         JevHttpClient.from_env({"JEV_BASE_URL": "https://jev.example"})
 
-    with pytest.raises(ValueError, match="JEV_BASE_URL is required"):
-        JevHttpClient.from_env({"JEV_API_KEY": "secret"})
+
+def test_from_env_uses_typesafe_defaults_and_alias_key() -> None:
+    client = JevHttpClient.from_env({"TYPESAFE_API_KEY": "secret"})
+
+    assert client.config.base_url == "https://api.typesafe.ai"
+    assert client.config.endpoint_path == "/v1/systemone"
+    assert client.config.model == "jev-latest"
 
 
 def test_from_env_parses_optional_settings_without_exposing_key() -> None:
@@ -81,7 +87,42 @@ async def test_client_posts_typed_request_with_secret_in_header_only(
     def fake_urlopen(request: Request, timeout: float) -> FakeResponse:
         captured["request"] = request
         captured["timeout"] = timeout
-        return FakeResponse(b'{"action":"HOLD","direction_5m":"FLAT"}')
+        return FakeResponse(
+            json.dumps(
+                {
+                    "model": "jev-1.13.0",
+                    "answers": {
+                        "action": {
+                            "type": "choice",
+                            "choice": "LONG",
+                            "probabilities": {"LONG": 0.7, "SHORT": 0.1, "HOLD": 0.2},
+                            "confidence": 0.7,
+                        },
+                        "direction_5m": {
+                            "type": "choice",
+                            "choice": "UP",
+                            "probabilities": {"UP": 0.8, "FLAT": 0.1, "DOWN": 0.1},
+                            "confidence": 0.8,
+                        },
+                        "regime": {
+                            "type": "choice",
+                            "choice": "TREND_UP",
+                            "probabilities": {"TREND_UP": 0.8, "RANGE": 0.2},
+                            "confidence": 0.8,
+                        },
+                        "setup_quality": {
+                            "type": "score",
+                            "score": 1.5,
+                            "legend": {"0": "unusable", "1": "mixed", "2": "strong"},
+                            "probabilities": {"0": 0.0, "1": 0.5, "2": 0.5},
+                            "confidence": 0.8,
+                        },
+                        "news_invalidates_signal": {"type": "noul", "noul": 0.1},
+                    },
+                    "usage": {"input_tokens": 10, "output_tokens": 20},
+                }
+            ).encode("utf-8")
+        )
 
     monkeypatch.setattr("trader_jev.jev_http.urlopen", fake_urlopen)
     client = JevHttpClient.from_env(
@@ -95,15 +136,23 @@ async def test_client_posts_typed_request_with_secret_in_header_only(
     result = await client.decide(request)
 
     sent_request = captured["request"]
-    assert sent_request.full_url == "https://jev.example/v1/decisions"
+    assert sent_request.full_url == "https://jev.example/v1/systemone"
     assert sent_request.get_header("Authorization") == "Bearer secret-value"
     assert captured["timeout"] == 5.0
     sent_body = json.loads(sent_request.data.decode("utf-8"))
-    assert sent_body["request_id"] == str(request.request_id)
-    assert sent_body["snapshot_id"] == str(request.snapshot_id)
-    assert sent_body["payload"] == {"symbol": "TEST"}
-    assert sent_body["model"] == "jev-paper"
+    assert sent_body["state"]["request_id"] == str(request.request_id)
+    assert sent_body["state"]["snapshot_id"] == str(request.snapshot_id)
+    assert sent_body["state"]["symbol"] == "TEST"
+    assert sent_body["model"] == "jev-latest"
+    assert sent_body["questions"]["action"]["type"] == "choice"
+    assert sent_body["questions"]["setup_quality"]["type"] == "score"
+    assert sent_body["questions"]["news_invalidates_signal"]["type"] == "noul"
     assert isinstance(result, Mapping)
+    assert result["action"] == "LONG"
+    assert result["direction_5m"] == "UP"
+    assert result["setup_quality"] == 0.75
+    assert result["p_up"] == Decimal("0.8")
+    assert result["usage"] == {"input_tokens": 10, "output_tokens": 20}
     assert "secret-value" not in sent_request.data.decode("utf-8")
 
 
@@ -125,6 +174,26 @@ async def test_response_size_limit_is_enforced(monkeypatch: pytest.MonkeyPatch) 
 
     with pytest.raises(JevHttpError, match="size limit"):
         await client.decide(request)
+
+
+@pytest.mark.asyncio
+async def test_client_rejects_response_without_typed_answers(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def fake_urlopen(request: Request, timeout: float) -> FakeResponse:
+        del request, timeout
+        return FakeResponse(b'{"model":"jev-1.13.0"}')
+
+    monkeypatch.setattr("trader_jev.jev_http.urlopen", fake_urlopen)
+    client = JevHttpClient(
+        JevHttpClientConfig(
+            base_url="https://jev.example",
+            api_key=SecretStr("secret"),
+        )
+    )
+
+    with pytest.raises(JevHttpError, match="answers object"):
+        await client.decide(_request())
 
 
 def test_http_client_is_async_compatible() -> None:

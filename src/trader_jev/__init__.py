@@ -12,6 +12,21 @@ from trader_jev.decision import (
     SingleFlightDecisionRunner,
 )
 from trader_jev.execution import ExecutionConfig, PaperBroker, PaperExecutionConfig
+from trader_jev.integration import (
+    IntegrationMode,
+    JevMLDecisionModel,
+    JevWithMLDecisionModel,
+    MLDecisionModel,
+)
+from trader_jev.ml import (
+    FeatureVectorizer,
+    LabelConfig,
+    LogisticRegressionBaseline,
+    MLModelConfig,
+    ModelArtifact,
+    TrainingDataset,
+    TrainingExample,
+)
 from trader_jev.models import (
     Action,
     BarEvent,
@@ -63,11 +78,20 @@ __all__ = [
     "ExecutionConfig",
     "FillEvent",
     "InstrumentMetadata",
+    "IntegrationMode",
     "JevAdapterConfig",
     "JevDecision",
     "JevDecisionAdapter",
     "JevDecisionModel",
     "JevRequest",
+    "JevMLDecisionModel",
+    "JevWithMLDecisionModel",
+    "LabelConfig",
+    "FeatureVectorizer",
+    "LogisticRegressionBaseline",
+    "MLDecisionModel",
+    "MLModelConfig",
+    "ModelArtifact",
     "NewsEvent",
     "OrderBookEvent",
     "OrderEvent",
@@ -85,6 +109,8 @@ __all__ = [
     "SingleFlightDecisionRunner",
     "TradeEvent",
     "TradeIntent",
+    "TrainingDataset",
+    "TrainingExample",
     "FixedTimeExitPolicy",
     "HybridExitPolicy",
     "LiveClock",

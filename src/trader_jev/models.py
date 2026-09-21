@@ -375,6 +375,8 @@ class PredictionOutput(DomainModel):
     model_version: str = Field(min_length=1)
     trained_until: datetime | date | None = None
     calibration_metadata: Mapping[str, Any] = Field(default_factory=dict)
+    uncertainty: Decimal | None = Field(default=None, ge=Decimal("0"), le=Decimal("1"))
+    feature_schema_version: str = Field(default="1.0", min_length=1)
 
     @field_validator("trained_until")
     @classmethod

@@ -59,6 +59,7 @@ from trader_jev.integration import (
     JevWithMLDecisionModel,
     MLDecisionModel,
 )
+from trader_jev.jev_http import JevHttpClient, JevHttpClientConfig, JevHttpError
 from trader_jev.ml import (
     FeatureVectorizer,
     LabelConfig,
@@ -169,6 +170,9 @@ __all__ = [
     "JevDecisionAdapter",
     "JevDecisionModel",
     "JevRequest",
+    "JevHttpClient",
+    "JevHttpClientConfig",
+    "JevHttpError",
     "JevMLDecisionModel",
     "JevWithMLDecisionModel",
     "LabelConfig",

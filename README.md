@@ -47,6 +47,7 @@ Jev を用いて、テクニカル・板・需給・ニュース・機械学習�
 3. [TRADING_ASSUMPTIONS.md](docs/TRADING_ASSUMPTIONS.md)
 4. [TEST_GATES.md](docs/TEST_GATES.md)
 5. [AGENT_GUIDE.md](docs/AGENT_GUIDE.md)
+6. [JEV_HTTP.md](docs/JEV_HTTP.md)（実Jev HTTP接続を使う場合）
 
 GitHub Issue #1 をロードマップの起点とします。
 

@@ -16,6 +16,7 @@ from trader_jev.decision import (
     build_jev_request,
     hold_intent,
 )
+from trader_jev.jev_http import JevHttpClient, JevHttpClientConfig, JevHttpError
 
 __all__ = [
     "DecisionCadenceConfig",
@@ -23,6 +24,9 @@ __all__ = [
     "JevAdapterResult",
     "JevAuditRecord",
     "JevClient",
+    "JevHttpClient",
+    "JevHttpClientConfig",
+    "JevHttpError",
     "JevDecision",
     "JevDecisionAdapter",
     "JevDecisionModel",

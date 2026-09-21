@@ -11,7 +11,7 @@ from collections.abc import Mapping
 from datetime import UTC, date, datetime, time
 from decimal import Decimal
 from enum import StrEnum
-from typing import Any
+from typing import Any, cast
 from uuid import UUID, uuid4
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
@@ -31,6 +31,63 @@ class DomainModel(BaseModel):
         str_strip_whitespace=True,
         validate_assignment=True,
     )
+
+
+class FrozenDict(dict[str, Any]):
+    """A JSON-serializable mapping that rejects mutation after construction.
+
+    Pydantic's ``frozen`` model option protects model attributes, but it does
+    not protect a nested ``dict``.  Decision snapshots cross async component
+    boundaries, so silently mutating one after it was emitted would make an
+    audit trail unreliable.  A dict subclass keeps Pydantic's normal JSON
+    encoder behaviour while enforcing value immutability at runtime.
+    """
+
+    __slots__ = ("_locked",)
+
+    def __init__(self, values: Mapping[str, Any] | None = None, **kwargs: Any) -> None:
+        super().__init__()
+        if values is not None:
+            super().update(values)
+        if kwargs:
+            super().update(kwargs)
+        object.__setattr__(self, "_locked", True)
+
+    def _reject(self) -> None:
+        if getattr(self, "_locked", False):
+            raise TypeError("frozen mapping cannot be mutated")
+
+    def __setitem__(self, key: str, value: Any) -> None:
+        self._reject()
+        super().__setitem__(key, value)
+
+    def __delitem__(self, key: str) -> None:
+        self._reject()
+        super().__delitem__(key)
+
+    def clear(self) -> None:
+        self._reject()
+        super().clear()
+
+    def pop(self, key: str, default: Any = None) -> Any:
+        self._reject()
+        return super().pop(key, default)
+
+    def popitem(self) -> tuple[str, Any]:
+        self._reject()
+        return super().popitem()
+
+    def setdefault(self, key: str, default: Any = None) -> Any:
+        self._reject()
+        return super().setdefault(key, default)
+
+    def update(
+        self,
+        *args: Any,
+        **kwargs: Any,
+    ) -> None:
+        self._reject()
+        super().update(*args, **kwargs)
 
 
 class Market(StrEnum):
@@ -234,6 +291,11 @@ class MarketState(DomainModel):
 class DataQuality(DomainModel):
     healthy: bool = True
     freshness_ms: int | None = Field(default=None, ge=0)
+    book_age_ms: int | None = Field(default=None, ge=0)
+    trade_age_ms: int | None = Field(default=None, ge=0)
+    news_age_ms: int | None = Field(default=None, ge=0)
+    source_lag_ms: int | None = Field(default=None, ge=0)
+    missing_fields: tuple[str, ...] = ()
     reasons: tuple[str, ...] = ()
 
 
@@ -254,9 +316,24 @@ class DecisionSnapshot(DomainModel):
     ml: Mapping[str, Any] = Field(default_factory=dict)
     portfolio: Mapping[str, Any] = Field(default_factory=dict)
     data_quality: DataQuality = Field(default_factory=DataQuality)
-    schema_version: str = "1.0"
+    schema_version: str = Field(default="1.0", min_length=1)
 
     _snapshot_time_aware = field_validator("event_time", "as_of")(_aware)
+
+    def model_post_init(self, __context: Any) -> None:
+        del __context
+        for field_name in (
+            "technical",
+            "orderbook",
+            "orderflow",
+            "supply_demand",
+            "short_history_summary",
+            "news",
+            "ml",
+            "portfolio",
+        ):
+            value = getattr(self, field_name)
+            object.__setattr__(self, field_name, _freeze_value(value))
 
     @model_validator(mode="after")
     def validate_point_in_time(self) -> DecisionSnapshot:
@@ -373,3 +450,18 @@ class FillEvent(DomainModel):
 MarketEvent = QuoteEvent | TradeEvent | OrderBookEvent | BarEvent
 ReplayEvent = MarketEvent | NewsEvent
 LedgerEvent = OrderEvent | FillEvent
+
+
+def _freeze_value(value: Any) -> Any:
+    """Recursively freeze mappings and sequences stored in a snapshot."""
+
+    if isinstance(value, FrozenDict):
+        return value
+    if isinstance(value, Mapping):
+        mapping = cast(Mapping[object, object], value)
+        return FrozenDict({str(key): _freeze_value(item) for key, item in mapping.items()})
+    if isinstance(value, list):
+        return tuple(_freeze_value(item) for item in cast(list[Any], value))
+    if isinstance(value, tuple):
+        return tuple(_freeze_value(item) for item in cast(tuple[Any, ...], value))
+    return value

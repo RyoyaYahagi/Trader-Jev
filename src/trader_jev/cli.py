@@ -21,11 +21,18 @@ from trader_jev.adapters import (
     SyntheticMarketDataAdapter,
 )
 from trader_jev.clock import ReplayClock
-from trader_jev.decision import JevAdapterConfig, JevClient, JevDecisionAdapter, JevDecisionModel
+from trader_jev.decision import (
+    JevAdapterConfig,
+    JevClient,
+    JevDecisionAdapter,
+    JevDecisionModel,
+)
 from trader_jev.execution import ExecutionConfig, PaperBroker
 from trader_jev.features import InMemoryFeatureEngine
-from trader_jev.interfaces import MarketDataAdapter
+from trader_jev.integration import IntegrationMode, JevMLDecisionModel, MLDecisionModel
+from trader_jev.interfaces import DecisionModel, MarketDataAdapter
 from trader_jev.jev_http import JevHttpClient
+from trader_jev.ml import load_prediction_model
 from trader_jev.models import (
     BarEvent,
     DomainModel,
@@ -132,6 +139,22 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--portfolio-id", default="paper")
     parser.add_argument("--report", type=Path, help="Optional path for the JSON summary.")
     parser.add_argument(
+        "--ml-artifact",
+        type=Path,
+        help="Optional logistic or LightGBM prediction artifact.",
+    )
+    parser.add_argument(
+        "--ml-mode",
+        choices=(
+            "ML_ONLY",
+            IntegrationMode.A_JEV_INPUT.value,
+            IntegrationMode.B_DETERMINISTIC_MERGE.value,
+            IntegrationMode.C_ML_SCREEN_JEV.value,
+        ),
+        default=IntegrationMode.A_JEV_INPUT.value,
+        help="How a loaded ML artifact is combined with Jev (default: A_JEV_INPUT).",
+    )
+    parser.add_argument(
         "--fail-on-corrupt",
         action="store_true",
         help="Stop when a historical input row cannot be normalized.",
@@ -158,10 +181,24 @@ async def run_paper(
     if quantity % instrument.lot_size != 0:
         raise ValueError("--quantity must be a multiple of --lot-size")
 
+    ml_artifact_path = getattr(args, "ml_artifact", None)
+    ml_mode = getattr(args, "ml_mode", IntegrationMode.A_JEV_INPUT.value)
+    prediction_model = load_prediction_model(ml_artifact_path) if ml_artifact_path else None
+    if ml_mode == "ML_ONLY" and prediction_model is None:
+        raise ValueError("--ml-artifact is required when --ml-mode=ML_ONLY")
+    if (
+        ml_mode != "ML_ONLY"
+        and prediction_model is None
+        and ml_mode != IntegrationMode.A_JEV_INPUT.value
+    ):
+        raise ValueError("--ml-artifact is required for the selected --ml-mode")
+
     env = load_env_file(args.env_file)
-    jev_client = client or JevHttpClient.from_env(env)
+    jev_client: JevClient | None = None
+    if ml_mode != "ML_ONLY":
+        jev_client = client or JevHttpClient.from_env(env)
     jev_timeout = 5.0
-    jev_model = "jev-latest"
+    jev_model = "jev-latest" if ml_mode != "ML_ONLY" else "ml"
     if isinstance(jev_client, JevHttpClient):
         jev_timeout = jev_client.config.timeout_seconds
         jev_model = jev_client.config.model
@@ -194,9 +231,9 @@ async def run_paper(
         portfolio_policy=FixedQuantityPortfolioPolicy(quantity),
         clock=clock,
     )
-    pipeline = TradingPipeline(
-        feature_engine=InMemoryFeatureEngine(),
-        decision_model=JevDecisionModel(
+    jev_model_instance: JevDecisionModel | None = None
+    if jev_client is not None:
+        jev_model_instance = JevDecisionModel(
             JevDecisionAdapter(
                 jev_client,
                 config=JevAdapterConfig(
@@ -205,7 +242,29 @@ async def run_paper(
                 ),
                 clock=clock,
             )
-        ),
+        )
+    decision_model: DecisionModel
+    if ml_mode == "ML_ONLY":
+        if prediction_model is None:
+            raise ValueError("--ml-artifact is required when --ml-mode=ML_ONLY")
+        decision_model = MLDecisionModel(prediction_model)
+    elif prediction_model is not None:
+        if jev_model_instance is None:
+            raise ValueError("a Jev client is required for Jev+ML modes")
+        decision_model = JevMLDecisionModel(
+            jev_model_instance,
+            prediction_model,
+            mode=IntegrationMode(ml_mode),
+        )
+    else:
+        if jev_model_instance is None:
+            raise ValueError("a Jev client is required")
+        decision_model = jev_model_instance
+
+    pipeline = TradingPipeline(
+        feature_engine=InMemoryFeatureEngine(),
+        decision_model=decision_model,
+        prediction_model=prediction_model,
         risk_engine=risk_engine,
         broker_adapter=broker,
         config=PipelineConfig(decision_timeout_seconds=jev_timeout + 0.5),
@@ -268,6 +327,11 @@ async def run_paper(
             "fee_bps": str(args.fee_bps),
             "slippage_bps": str(args.slippage_bps),
             "latency_ms": args.latency_ms,
+            "ml_artifact": str(ml_artifact_path) if ml_artifact_path is not None else None,
+            "ml_mode": ml_mode,
+            "ml_model_version": (
+                prediction_model.model_version if prediction_model is not None else None
+            ),
         },
     )
     return summary
@@ -285,7 +349,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             args.report.write_text(encoded + "\n", encoding="utf-8")
         print(encoded)
         return 0
-    except (AdapterNormalizationError, OSError, ValueError) as exc:
+    except (AdapterNormalizationError, OSError, RuntimeError, ValueError) as exc:
         parser.exit(2, f"error: {exc}\n")
 
 

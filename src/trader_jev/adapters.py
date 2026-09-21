@@ -1,385 +1,452 @@
-"""Market-specific message normalization kept outside the core domain."""
+"""Historical, file, and deterministic synthetic market data adapters.
+
+The current milestone deliberately has no broker SDK or realtime transport.
+Every adapter in this module reads an existing dataset or creates deterministic
+fixtures, then emits only market-neutral core events.
+"""
 
 from __future__ import annotations
 
+import csv
 import json
-from collections.abc import AsyncIterator, Mapping, Sequence
-from datetime import UTC, datetime
-from decimal import Decimal, InvalidOperation
-from typing import Any, Protocol, cast
-from uuid import NAMESPACE_URL, UUID, uuid5
-from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
+from collections.abc import AsyncIterator, Iterator, Mapping, Sequence
+from dataclasses import dataclass, field
+from datetime import datetime, timedelta
+from decimal import Decimal
+from pathlib import Path
+from typing import Any, cast
+from uuid import NAMESPACE_URL, uuid5
 
-import websockets
+from pydantic import ValidationError
 
-from trader_jev.clock import SystemClock
-from trader_jev.interfaces import Clock
+from trader_jev.interfaces import HistoricalDataAdapter, MarketDataAdapter
 from trader_jev.models import (
-    Action,
+    BarEvent,
     InstrumentMetadata,
     MarketEvent,
     OrderBookEvent,
-    OrderBookLevel,
     QuoteEvent,
     TradeEvent,
 )
 
 
 class AdapterNormalizationError(ValueError):
-    """Raised when a vendor message cannot be converted to a core event."""
+    """Raised when a historical record cannot be converted to a core event."""
 
 
-class KabuStationMessageSource(Protocol):
-    """Injected transport for kabuステーション WebSocket/auth details."""
-
-    def stream(self, symbols: Sequence[str]) -> AsyncIterator[Mapping[str, Any]]:
-        """Yield decoded vendor messages; no vendor type enters the core."""
-        ...
+def _empty_strings() -> list[str]:
+    return []
 
 
-class KabuStationWebSocketSource:
-    """Read the official kabuステーション PUSH WebSocket as JSON mappings.
+@dataclass
+class FileReadStats:
+    """Counters and row-level diagnostics from one file read."""
 
-    Symbol registration is intentionally kept separate: the official API uses
-    REST ``銘柄登録`` before PUSH delivery.  This source only owns the socket;
-    credentials and registration can be supplied by a separate operational
-    component without entering the normalized core.
+    total_rows: int = 0
+    accepted_rows: int = 0
+    rejected_rows: int = 0
+    errors: list[str] = field(default_factory=_empty_strings)
+
+    @property
+    def healthy(self) -> bool:
+        return self.rejected_rows == 0
+
+
+class FileMarketDataAdapter:
+    """Read normalized JSONL/NDJSON or CSV market data without a broker API.
+
+    JSON records may be serialized core events, records with an ``event_type``
+    field, or raw rows containing a symbol and event fields.  CSV rows use the
+    same field names; ``bids`` and ``asks`` may contain JSON arrays.  When a
+    historical row has no availability timestamp, ``received_at`` is set to
+    ``event_time`` explicitly so replay remains deterministic.
     """
 
     def __init__(
         self,
-        url: str = "ws://localhost:18080/kabusapi/websocket",
+        path: str | Path,
         *,
-        ping_interval_seconds: float = 20.0,
+        skip_corrupt_rows: bool = True,
+        source_name: str = "file",
+        start: datetime | None = None,
+        end: datetime | None = None,
     ) -> None:
-        if not url.startswith(("ws://", "wss://")):
-            raise ValueError("kabu WebSocket URL must use ws:// or wss://")
-        if ping_interval_seconds <= 0:
-            raise ValueError("ping_interval_seconds must be positive")
-        self.url = url
-        self.ping_interval_seconds = ping_interval_seconds
+        self.path = Path(path)
+        self.skip_corrupt_rows = skip_corrupt_rows
+        self.source_name = source_name
+        self._start = start
+        self._end = end
+        self._stats = FileReadStats()
+        _validate_range(start, end)
+        if not source_name.strip():
+            raise ValueError("source_name must not be empty")
 
-    async def stream(self, symbols: Sequence[str]) -> AsyncIterator[Mapping[str, Any]]:
-        if not symbols:
-            raise ValueError("at least one symbol is required")
-        if len(symbols) > 50:
-            raise ValueError("kabuステーション PUSH supports at most 50 symbols")
-        async with websockets.connect(
-            self.url,
-            ping_interval=self.ping_interval_seconds,
-        ) as socket:
-            async for raw_message in socket:
-                try:
-                    message = json.loads(raw_message)
-                except json.JSONDecodeError as exc:
-                    raise AdapterNormalizationError("kabu PUSH message is not valid JSON") from exc
-                if not isinstance(message, Mapping):
-                    raise AdapterNormalizationError("kabu PUSH message must be a JSON object")
-                yield message
+    @property
+    def stats(self) -> FileReadStats:
+        """Return diagnostics for the most recent ``read_events`` call."""
 
+        return self._stats
 
-class KabuStationMarketDataAdapter:
-    """Normalize kabuステーション-like messages into core MarketEvents.
+    def read_events(self, instruments: Sequence[InstrumentMetadata]) -> tuple[MarketEvent, ...]:
+        """Read rows in source order, preserving the order for quality checks."""
 
-    The transport is injected deliberately: credentials, token refresh, socket
-    reconnect, and vendor SDK details stay in the source implementation.  This
-    adapter owns only field mapping and timestamp normalization.
-    """
-
-    def __init__(
-        self,
-        source: KabuStationMessageSource,
-        *,
-        clock: Clock | None = None,
-        source_name: str = "kabu-station",
-    ) -> None:
-        self._source = source
-        self._clock = clock or SystemClock()
-        self._source_name = source_name
-
-    async def stream(self, instruments: Sequence[InstrumentMetadata]) -> AsyncIterator[MarketEvent]:
-        by_symbol = {instrument.symbol: instrument for instrument in instruments}
-        async for message in self._source.stream(tuple(by_symbol)):
-            symbol_value = self._pick(message, "symbol", "Symbol", default=None)
-            symbol = str(symbol_value) if symbol_value is not None else None
-            if symbol is None or symbol not in by_symbol:
-                if len(by_symbol) == 1:
-                    instrument = next(iter(by_symbol.values()))
-                else:
-                    raise AdapterNormalizationError(
-                        f"message symbol is missing or unknown: {symbol_value!r}"
-                    )
-            else:
-                instrument = by_symbol[symbol]
-            yield self.normalize_message(message, instrument)
-
-    def normalize_message(
-        self,
-        message: Mapping[str, Any],
-        instrument: InstrumentMetadata,
-    ) -> MarketEvent:
-        event_type = self._event_type(message)
-        event_time = self._timestamp(message, instrument)
-        sequence_number = self._integer(
-            self._pick(message, "sequence_number", "SequenceNumber", "seq", default=None)
-        )
-        event_id = self._event_id(message, instrument, event_type, sequence_number, event_time)
-        common: dict[str, Any] = {
-            "event_id": event_id,
-            "instrument": instrument,
-            "event_time": event_time,
-            "received_at": self._clock.now(),
-            "source": self._source_name,
-            "schema_version": str(self._pick(message, "schema_version", default="1.0")),
-            "sequence_number": sequence_number,
-            "trading_status": self._text(
-                self._pick(
-                    message,
-                    "trading_status",
-                    "TradingStatus",
-                    "CurrentPriceStatus",
-                    default=None,
-                )
-            ),
-        }
-        if event_type == "quote":
-            return QuoteEvent(
-                **common,
-                bid=self._decimal(
-                    self._pick(message, "bid", "BidPrice", "BestBidPrice", "Bid1"),
-                    "bid",
-                ),
-                ask=self._decimal(
-                    self._pick(message, "ask", "AskPrice", "BestAskPrice", "Ask1"),
-                    "ask",
-                ),
-                bid_size=self._decimal(
-                    self._pick(message, "bid_size", "BidQty", "BestBidQty", "Bid1Qty", default=0),
-                    "bid_size",
-                ),
-                ask_size=self._decimal(
-                    self._pick(message, "ask_size", "AskQty", "BestAskQty", "Ask1Qty", default=0),
-                    "ask_size",
-                ),
-            )
-        if event_type == "trade":
-            return TradeEvent(
-                **common,
-                price=self._decimal(
-                    self._pick(message, "price", "CurrentPrice", "trade_price"),
-                    "price",
-                ),
-                size=self._decimal(
-                    self._pick(message, "size", "TradeSize", "CurrentPriceSize", "volume"),
-                    "size",
-                ),
-                aggressor=self._action(
-                    self._pick(message, "aggressor", "AggressorSide", "side", default=None)
-                ),
-            )
-        return OrderBookEvent(
-            **common,
-            bids=self._levels(message, "bids", "Bids", "bid_levels", side="bid"),
-            asks=self._levels(message, "asks", "Asks", "ask_levels", side="ask"),
-        )
-
-    @classmethod
-    def _event_type(cls, message: Mapping[str, Any]) -> str:
-        raw = cls._pick(message, "event_type", "EventType", "type", "Type", default=None)
-        if raw is not None:
-            value = str(raw).lower().replace("-", "_").replace(" ", "_")
-            if value in {"trade", "execution", "tick", "transaction"}:
-                return "trade"
-            if value in {"order_book", "orderbook", "book", "depth", "l2"}:
-                return "order_book"
-            if value in {"quote", "best_quote", "board"}:
-                return "quote"
-        if (
-            cls._pick(
-                message,
-                "bids",
-                "Bids",
-                "asks",
-                "Asks",
-                "Buy1",
-                "Sell1",
-                default=None,
-            )
-            is not None
-        ):
-            return "order_book"
-        return "quote"
-
-    def _timestamp(self, message: Mapping[str, Any], instrument: InstrumentMetadata) -> datetime:
-        raw = self._pick(
-            message,
-            "event_time",
-            "exchange_time",
-            "ExchangeTime",
-            "CurrentPriceTime",
-            "timestamp",
-            "time",
-            default=None,
-        )
-        if raw is None:
-            return self._clock.now()
-        if isinstance(raw, datetime):
-            parsed = raw
-        elif isinstance(raw, (int, float)):
-            parsed = datetime.fromtimestamp(raw, tz=UTC)
-        else:
-            text = str(raw).replace("Z", "+00:00")
-            try:
-                parsed = datetime.fromisoformat(text)
-            except ValueError as exc:
-                raise AdapterNormalizationError(f"invalid exchange timestamp: {raw!r}") from exc
-        if parsed.tzinfo is not None and parsed.utcoffset() is not None:
-            return parsed
+        self._stats = FileReadStats()
+        if not self.path.is_file():
+            raise AdapterNormalizationError(f"historical data file does not exist: {self.path}")
         try:
-            return parsed.replace(tzinfo=ZoneInfo(instrument.timezone))
-        except ZoneInfoNotFoundError as exc:
+            if self.path.suffix.lower() in {".json", ".jsonl", ".ndjson"}:
+                rows = self._read_json_rows(instruments)
+            elif self.path.suffix.lower() == ".csv":
+                rows = self._read_csv_rows(instruments)
+            else:
+                raise AdapterNormalizationError(
+                    f"unsupported historical data format: {self.path.suffix or '<none>'}"
+                )
+            return tuple(rows)
+        except OSError as exc:
             raise AdapterNormalizationError(
-                f"unknown instrument timezone: {instrument.timezone!r}"
+                f"could not read historical data file: {self.path}"
             ) from exc
 
-    @classmethod
-    def _event_id(
-        cls,
-        message: Mapping[str, Any],
-        instrument: InstrumentMetadata,
-        event_type: str,
-        sequence_number: int | None,
-        event_time: datetime,
-    ) -> UUID:
-        raw = cls._pick(message, "event_id", "EventId", "id", default=None)
-        if raw is not None:
-            try:
-                return UUID(str(raw))
-            except ValueError:
-                return uuid5(NAMESPACE_URL, f"{instrument.symbol}:{raw}")
-        if sequence_number is not None:
-            return uuid5(
-                NAMESPACE_URL,
-                f"{instrument.market.value}:{instrument.symbol}:{event_type}:"
-                f"{sequence_number}:{event_time.isoformat()}",
-            )
-        return uuid5(
-            NAMESPACE_URL,
-            f"{instrument.market.value}:{instrument.symbol}:{event_type}:"
-            f"{event_time.isoformat()}:{canonical_message_json(message)}",
-        )
+    async def replay(
+        self,
+        instruments: Sequence[InstrumentMetadata],
+        start: datetime,
+        end: datetime,
+    ) -> AsyncIterator[MarketEvent]:
+        """Yield available events in deterministic receive-time order."""
 
-    @classmethod
-    def _levels(
-        cls,
-        message: Mapping[str, Any],
-        *names: str,
-        side: str,
-    ) -> tuple[OrderBookLevel, ...]:
-        raw_levels = cls._pick(message, *names, default=None)
-        if raw_levels is None:
-            raw_levels = cls._numbered_levels(message, side)
-        if raw_levels is None:
-            return ()
-        if not isinstance(raw_levels, Sequence) or isinstance(raw_levels, (str, bytes)):
-            raise AdapterNormalizationError(f"{side} levels must be a sequence")
-        levels: list[OrderBookLevel] = []
-        for raw_level in cast(Sequence[Any], raw_levels):
-            if isinstance(raw_level, Mapping):
-                mapping_level = cast(Mapping[str, Any], raw_level)
-                price = cls._pick(mapping_level, "price", "Price", "p")
-                size = cls._pick(mapping_level, "size", "Qty", "quantity", "q")
-            elif isinstance(raw_level, Sequence):
-                level_values = cast(Sequence[Any], raw_level)
-                if len(level_values) < 2:
-                    raise AdapterNormalizationError(f"invalid {side} level: {raw_level!r}")
-                price, size = level_values[0], level_values[1]
-            else:
-                raise AdapterNormalizationError(f"invalid {side} level: {raw_level!r}")
-            levels.append(
-                OrderBookLevel(
-                    price=cls._decimal(price, f"{side}.price"),
-                    size=cls._decimal(size, f"{side}.size"),
+        _validate_range(start, end)
+        events = sorted(self.read_events(instruments), key=_event_sort_key)
+        for event in events:
+            if start <= event.received_at < end:
+                yield event
+
+    async def stream(self, instruments: Sequence[InstrumentMetadata]) -> AsyncIterator[MarketEvent]:
+        """Expose a configured file range through the pipeline adapter contract."""
+
+        if self._start is None or self._end is None:
+            raise ValueError("FileMarketDataAdapter.stream requires start and end")
+        async for event in self.replay(instruments, self._start, self._end):
+            yield event
+
+    def _read_json_rows(self, instruments: Sequence[InstrumentMetadata]) -> Iterator[MarketEvent]:
+        with self.path.open("r", encoding="utf-8") as handle:
+            for line_number, line in enumerate(handle, start=1):
+                if not line.strip():
+                    continue
+                self._stats.total_rows += 1
+                try:
+                    record = json.loads(line)
+                    if not isinstance(record, Mapping):
+                        raise AdapterNormalizationError("row must be a JSON object")
+                    yield self._event_from_record(cast(Mapping[str, Any], record), instruments)
+                except (AdapterNormalizationError, TypeError, ValueError, ValidationError) as exc:
+                    self._reject_row(line_number, exc)
+
+    def _read_csv_rows(self, instruments: Sequence[InstrumentMetadata]) -> Iterator[MarketEvent]:
+        with self.path.open("r", encoding="utf-8", newline="") as handle:
+            reader = csv.DictReader(handle)
+            if reader.fieldnames is None:
+                raise AdapterNormalizationError("CSV historical data has no header")
+            for row in reader:
+                line_number = reader.line_num
+                self._stats.total_rows += 1
+                try:
+                    record: dict[str, Any] = {
+                        key: value for key, value in row.items() if key is not None and value != ""
+                    }
+                    for field_name in ("instrument", "payload", "payload_json", "bids", "asks"):
+                        value = record.get(field_name)
+                        if isinstance(value, str) and value:
+                            record[field_name] = json.loads(value)
+                    yield self._event_from_record(record, instruments)
+                except (AdapterNormalizationError, TypeError, ValueError, ValidationError) as exc:
+                    self._reject_row(line_number, exc)
+
+    def _reject_row(self, line_number: int, error: Exception) -> None:
+        message = f"{self.path}:{line_number}: {error}"
+        self._stats.rejected_rows += 1
+        self._stats.errors.append(message)
+        if not self.skip_corrupt_rows:
+            raise AdapterNormalizationError(message) from error
+
+    def _event_from_record(
+        self,
+        record: Mapping[str, Any],
+        instruments: Sequence[InstrumentMetadata],
+    ) -> MarketEvent:
+        outer = dict(record)
+        event_type = _event_type(outer)
+        payload_value = outer.get("payload_json", outer.get("payload"))
+        if payload_value is None:
+            payload: dict[str, Any] = dict(outer)
+        elif isinstance(payload_value, Mapping):
+            payload = dict(cast(Mapping[str, Any], payload_value))
+        elif isinstance(payload_value, str):
+            try:
+                decoded = json.loads(payload_value)
+            except json.JSONDecodeError as exc:
+                raise AdapterNormalizationError("payload is not valid JSON") from exc
+            if not isinstance(decoded, Mapping):
+                raise AdapterNormalizationError("payload must be a JSON object")
+            payload = dict(cast(Mapping[str, Any], decoded))
+        else:
+            raise AdapterNormalizationError("payload must be a mapping or JSON object")
+
+        event_type = event_type or _event_type(payload)
+        if event_type is None:
+            raise AdapterNormalizationError("could not infer historical event_type")
+
+        instrument = _resolve_instrument(outer, payload, instruments)
+        clean_payload = dict(payload)
+        for key in (
+            "event_type",
+            "type",
+            "EventType",
+            "symbol",
+            "Symbol",
+            "market",
+            "Market",
+            "date",
+            "payload",
+            "payload_json",
+        ):
+            clean_payload.pop(key, None)
+        clean_payload["instrument"] = instrument
+        _copy_alias(clean_payload, "event_time", "timestamp", "time", "exchange_time")
+        _copy_alias(clean_payload, "received_at", "available_at", "available_time")
+        if "event_time" not in clean_payload:
+            raise AdapterNormalizationError("event_time/timestamp is required")
+        clean_payload.setdefault("received_at", clean_payload["event_time"])
+        clean_payload.setdefault("source", self.source_name)
+        clean_payload.setdefault("schema_version", "1.0")
+        if "event_id" not in clean_payload or clean_payload["event_id"] in (None, ""):
+            clean_payload["event_id"] = str(
+                uuid5(
+                    NAMESPACE_URL,
+                    canonical_record_json({"event_type": event_type, **clean_payload}),
                 )
             )
-        return tuple(levels)
 
-    @classmethod
-    def _numbered_levels(cls, message: Mapping[str, Any], side: str) -> tuple[tuple[Any, Any], ...]:
-        levels: list[tuple[Any, Any]] = []
-        prefix = "Buy" if side == "bid" else "Sell"
-        for level_number in range(1, 11):
-            raw_level = cls._pick(message, f"{prefix}{level_number}", default=None)
-            if raw_level is None:
-                continue
-            if isinstance(raw_level, Mapping):
-                mapping_level = cast(Mapping[str, Any], raw_level)
-                price = cls._pick(mapping_level, "price", "Price", "p", default=None)
-                size = cls._pick(mapping_level, "size", "Qty", "quantity", "q", default=None)
-                if price is not None and size is not None:
-                    levels.append((price, size))
-                continue
-            if isinstance(raw_level, Sequence) and not isinstance(raw_level, (str, bytes)):
-                values = list(cast(Sequence[Any], raw_level))
-                if len(values) >= 2:
-                    if len(values) >= 4 and not isinstance(values[0], (int, float, Decimal)):
-                        levels.append((values[2], values[3]))
-                    else:
-                        levels.append((values[0], values[1]))
-        return tuple(levels)
-
-    @staticmethod
-    def _pick(
-        message: Mapping[str, Any],
-        *names: str,
-        default: Any = ...,
-    ) -> Any:
-        for name in names:
-            if name in message and message[name] is not None:
-                return message[name]
-        if default is not ...:
-            return default
-        raise AdapterNormalizationError(f"missing required market field; tried {names!r}")
-
-    @staticmethod
-    def _decimal(value: Any, field_name: str) -> Decimal:
         try:
-            parsed = Decimal(str(value))
-        except (InvalidOperation, ValueError) as exc:
-            raise AdapterNormalizationError(f"invalid decimal for {field_name}: {value!r}") from exc
-        if not parsed.is_finite():
-            raise AdapterNormalizationError(f"non-finite decimal for {field_name}: {value!r}")
-        return parsed
-
-    @staticmethod
-    def _integer(value: Any) -> int | None:
-        if value is None:
-            return None
-        try:
-            return int(value)
-        except (TypeError, ValueError) as exc:
-            raise AdapterNormalizationError(f"invalid sequence number: {value!r}") from exc
-
-    @staticmethod
-    def _text(value: Any) -> str | None:
-        return None if value is None else str(value)
-
-    @staticmethod
-    def _action(value: Any) -> Action | None:
-        if value is None:
-            return None
-        normalized = str(value).upper()
-        if normalized in {"BUY", "B", "LONG"}:
-            return Action.LONG
-        if normalized in {"SELL", "S", "SHORT"}:
-            return Action.SHORT
-        return None
+            event = _validate_event(event_type, clean_payload)
+        except (TypeError, ValueError, ValidationError) as exc:
+            raise AdapterNormalizationError(
+                f"invalid {event_type} event for {instrument.symbol}: {exc}"
+            ) from exc
+        self._stats.accepted_rows += 1
+        return event
 
 
-def canonical_message_json(message: Mapping[str, Any]) -> str:
-    """Stable representation useful for adapter fixtures and audit diagnostics."""
+class SyntheticMarketDataAdapter:
+    """Generate deterministic quote events for tests and dry-run examples."""
+
+    def __init__(
+        self,
+        *,
+        start: datetime | None = None,
+        end: datetime | None = None,
+        interval: timedelta = timedelta(minutes=1),
+        seed: int = 0,
+    ) -> None:
+        if interval <= timedelta(0):
+            raise ValueError("interval must be positive")
+        self._start = start
+        self._end = end
+        self.interval = interval
+        self.seed = seed
+        _validate_range(start, end)
+
+    async def replay(
+        self,
+        instruments: Sequence[InstrumentMetadata],
+        start: datetime,
+        end: datetime,
+    ) -> AsyncIterator[MarketEvent]:
+        _validate_range(start, end)
+        ordered_instruments = tuple(sorted(instruments, key=_instrument_sort_key))
+        current = start
+        step = 0
+        while current < end:
+            for instrument in ordered_instruments:
+                yield self._quote(instrument, current, step)
+            current += self.interval
+            step += 1
+
+    async def stream(self, instruments: Sequence[InstrumentMetadata]) -> AsyncIterator[MarketEvent]:
+        if self._start is None or self._end is None:
+            raise ValueError("SyntheticMarketDataAdapter.stream requires start and end")
+        async for event in self.replay(instruments, self._start, self._end):
+            yield event
+
+    def _quote(
+        self,
+        instrument: InstrumentMetadata,
+        event_time: datetime,
+        step: int,
+    ) -> QuoteEvent:
+        symbol_offset = sum(ord(character) for character in instrument.symbol) % 17
+        mid = Decimal("100") + Decimal(symbol_offset) / Decimal("10")
+        mid += Decimal(step % 20) * Decimal("0.05") + Decimal(self.seed % 11)
+        spread = max(instrument.tick_size, Decimal("0.02"))
+        event_id = uuid5(
+            NAMESPACE_URL,
+            f"synthetic:{self.seed}:{instrument.market.value}:{instrument.symbol}:{event_time.isoformat()}",
+        )
+        return QuoteEvent(
+            event_id=event_id,
+            instrument=instrument,
+            event_time=event_time,
+            received_at=event_time,
+            source=f"synthetic:{self.seed}",
+            sequence_number=step,
+            bid=mid - spread / Decimal("2"),
+            ask=mid + spread / Decimal("2"),
+            bid_size=Decimal(100 + (step % 5) * 10),
+            ask_size=Decimal(110 + (step % 5) * 10),
+        )
+
+
+def _event_type(record: Mapping[str, Any]) -> str | None:
+    raw = record.get("event_type", record.get("type", record.get("EventType")))
+    if raw is not None:
+        normalized = str(raw).lower().replace("-", "_").replace(" ", "_")
+        aliases = {
+            "quote": "quote",
+            "best_quote": "quote",
+            "trade": "trade",
+            "tick": "trade",
+            "execution": "trade",
+            "order_book": "order_book",
+            "orderbook": "order_book",
+            "book": "order_book",
+            "depth": "order_book",
+            "l2": "order_book",
+            "bar": "bar",
+            "ohlcv": "bar",
+            "candle": "bar",
+        }
+        if normalized not in aliases:
+            raise AdapterNormalizationError(f"unsupported event_type: {raw!r}")
+        return aliases[normalized]
+    if {"open", "high", "low", "close"}.issubset(record):
+        return "bar"
+    if {"bid", "ask"}.issubset(record):
+        return "quote"
+    if {"price", "size"}.issubset(record):
+        return "trade"
+    if "bids" in record or "asks" in record:
+        return "order_book"
+    return None
+
+
+def _resolve_instrument(
+    outer: Mapping[str, Any],
+    payload: Mapping[str, Any],
+    instruments: Sequence[InstrumentMetadata],
+) -> InstrumentMetadata:
+    raw_instrument = payload.get("instrument", outer.get("instrument"))
+    if raw_instrument is not None:
+        if isinstance(raw_instrument, InstrumentMetadata):
+            candidate = raw_instrument
+        elif isinstance(raw_instrument, Mapping):
+            candidate = InstrumentMetadata.model_validate(raw_instrument)
+        else:
+            raise AdapterNormalizationError("instrument must be an object")
+        matches = [
+            item for item in instruments if _instrument_key(item) == _instrument_key(candidate)
+        ]
+        if instruments and not matches:
+            raise AdapterNormalizationError(
+                f"instrument {candidate.market.value}:{candidate.symbol} is not in the requested "
+                "universe"
+            )
+        return matches[0] if matches else candidate
+
+    raw_symbol = payload.get(
+        "symbol", payload.get("Symbol", outer.get("symbol", outer.get("Symbol")))
+    )
+    raw_market = payload.get(
+        "market", payload.get("Market", outer.get("market", outer.get("Market")))
+    )
+    candidates = list(instruments)
+    if raw_symbol is not None:
+        candidates = [item for item in candidates if item.symbol == str(raw_symbol)]
+    if raw_market is not None:
+        market_value = getattr(raw_market, "value", raw_market)
+        candidates = [item for item in candidates if item.market.value == str(market_value)]
+    if len(candidates) != 1:
+        raise AdapterNormalizationError(
+            "a unique instrument is required when the row has no instrument object"
+        )
+    return candidates[0]
+
+
+def _validate_event(event_type: str, payload: Mapping[str, Any]) -> MarketEvent:
+    if event_type == "quote":
+        return QuoteEvent.model_validate(payload)
+    if event_type == "trade":
+        return TradeEvent.model_validate(payload)
+    if event_type == "order_book":
+        return OrderBookEvent.model_validate(payload)
+    if event_type == "bar":
+        return BarEvent.model_validate(payload)
+    raise AdapterNormalizationError(f"unsupported event_type: {event_type}")
+
+
+def _copy_alias(payload: dict[str, Any], target: str, *aliases: str) -> None:
+    if target in payload:
+        return
+    for alias in aliases:
+        if alias in payload:
+            payload[target] = payload[alias]
+            return
+
+
+def canonical_record_json(record: Mapping[str, Any]) -> str:
+    """Return a stable representation for deterministic file-event IDs."""
 
     try:
-        return json.dumps(message, sort_keys=True, default=str, separators=(",", ":"))
+        return json.dumps(record, sort_keys=True, default=str, separators=(",", ":"))
     except (TypeError, ValueError) as exc:
-        raise AdapterNormalizationError("market message is not JSON-serializable") from exc
+        raise AdapterNormalizationError("historical record is not JSON-serializable") from exc
+
+
+def _instrument_key(instrument: InstrumentMetadata) -> tuple[str, str]:
+    return instrument.market.value, instrument.symbol
+
+
+def _instrument_sort_key(instrument: InstrumentMetadata) -> tuple[str, str]:
+    return _instrument_key(instrument)
+
+
+def _event_sort_key(event: MarketEvent) -> tuple[datetime, datetime, int, str]:
+    return (
+        event.received_at,
+        event.event_time,
+        event.sequence_number if event.sequence_number is not None else 2**63 - 1,
+        str(event.event_id),
+    )
+
+
+def _validate_range(start: datetime | None, end: datetime | None) -> None:
+    if (start is None) != (end is None):
+        raise ValueError("start and end must be provided together")
+    for name, value in (("start", start), ("end", end)):
+        if value is not None and (value.tzinfo is None or value.utcoffset() is None):
+            raise ValueError(f"{name} must be timezone-aware")
+    if start is not None and end is not None and end < start:
+        raise ValueError("end must not be earlier than start")
+
+
+def as_historical_adapter(adapter: HistoricalDataAdapter) -> HistoricalDataAdapter:
+    """Make the intended historical adapter boundary explicit for callers."""
+
+    return adapter
+
+
+def as_market_data_adapter(adapter: MarketDataAdapter) -> MarketDataAdapter:
+    """Make the pipeline adapter boundary explicit for callers."""
+
+    return adapter

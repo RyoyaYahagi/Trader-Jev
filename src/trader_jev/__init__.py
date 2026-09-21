@@ -2,6 +2,7 @@
 
 from trader_jev.models import (
     Action,
+    BarEvent,
     DecisionSnapshot,
     FillEvent,
     InstrumentMetadata,
@@ -18,6 +19,7 @@ from trader_jev.models import (
 
 __all__ = [
     "Action",
+    "BarEvent",
     "DecisionSnapshot",
     "FillEvent",
     "InstrumentMetadata",

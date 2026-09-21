@@ -13,6 +13,7 @@ import duckdb
 import polars as pl
 
 from trader_jev.models import (
+    BarEvent,
     InstrumentMetadata,
     MarketEvent,
     OrderBookEvent,
@@ -38,6 +39,7 @@ _ROW_SCHEMA: dict[str, Any] = {
 }
 
 _EVENT_TYPES: dict[type[MarketEvent], str] = {
+    BarEvent: "bar",
     QuoteEvent: "quote",
     TradeEvent: "trade",
     OrderBookEvent: "order_book",
@@ -174,6 +176,12 @@ class ParquetEventStore:
             )
         selected.sort(key=lambda item: (item[0], item[1], item[2], item[3]))
         return tuple(item[4] for item in selected)
+
+    def event_ids(self) -> tuple[str, ...]:
+        """Return persisted event IDs for idempotent historical ingestion."""
+
+        rows = self.query("SELECT event_id FROM raw_events WHERE event_id IS NOT NULL")
+        return tuple(str(event_id) for event_id in rows["event_id"].to_list())
 
     def _write_rows(self, partition: Path, rows: Sequence[dict[str, object]]) -> Path:
         partition.mkdir(parents=True, exist_ok=True)

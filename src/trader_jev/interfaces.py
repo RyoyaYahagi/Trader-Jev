@@ -31,7 +31,7 @@ class Clock(Protocol):
 
 
 class MarketDataAdapter(Protocol):
-    """Convert a live market SDK into normalized core events."""
+    """Yield normalized events to the core pipeline."""
 
     def stream(self, instruments: Sequence[InstrumentMetadata]) -> AsyncIterator[MarketEvent]:
         """Yield normalized market events without exposing SDK types."""
@@ -39,7 +39,7 @@ class MarketDataAdapter(Protocol):
 
 
 class HistoricalDataAdapter(Protocol):
-    """Replay historical events in point-in-time order."""
+    """Read historical data without coupling the core to a vendor API."""
 
     def replay(
         self,

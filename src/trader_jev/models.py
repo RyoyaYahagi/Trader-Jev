@@ -176,6 +176,25 @@ class OrderBookEvent(EventModel):
     asks: tuple[OrderBookLevel, ...] = ()
 
 
+class BarEvent(EventModel):
+    """A time-bucketed OHLCV observation from a historical dataset."""
+
+    open: Decimal = Field(gt=Decimal("0"))
+    high: Decimal = Field(gt=Decimal("0"))
+    low: Decimal = Field(gt=Decimal("0"))
+    close: Decimal = Field(gt=Decimal("0"))
+    volume: Decimal = Field(ge=Decimal("0"))
+    interval_seconds: int = Field(default=60, gt=0)
+
+    @model_validator(mode="after")
+    def validate_ohlc(self) -> BarEvent:
+        if self.high < max(self.open, self.close, self.low):
+            raise ValueError("bar high must be at least open, close, and low")
+        if self.low > min(self.open, self.close, self.high):
+            raise ValueError("bar low must be at most open, close, and high")
+        return self
+
+
 class NewsEvent(EventModel):
     headline: str = Field(min_length=1)
     summary: str | None = None
@@ -351,5 +370,5 @@ class FillEvent(DomainModel):
     _fill_time_aware = field_validator("occurred_at")(_aware)
 
 
-MarketEvent = QuoteEvent | TradeEvent | OrderBookEvent
+MarketEvent = QuoteEvent | TradeEvent | OrderBookEvent | BarEvent
 LedgerEvent = OrderEvent | FillEvent

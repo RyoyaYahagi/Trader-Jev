@@ -2,324 +2,237 @@
 
 ## 1. Purpose
 
-Trader-Jev は、短期市場データを Jev で統合し、3〜5分程度のデイトレ意思決定に利用できるかを検証するための研究・実装基盤である。
+Trader-Jev は、短期市場データを Jev で統合し、3〜5分程度のデイトレ判断に利用できるかを **仮想取引** で検証する研究基盤である。
 
-単なる「自動売買Bot」を作ることではなく、以下を分離して評価する。
+現在の目的は実売買Botを作ることではない。
 
-- 数値特徴量だけでも売買優位性が存在するか
-- Jev-only が Rule-based baseline を改善するか
-- ML-only が有効か
-- ML予測を Jev に統合すると改善するか
-- ニュースを追加すると改善するか
-- 資金・単元・Risk制約を入れたときも優位性が残るか
-- Paper と実市場の execution 差を吸収できるか
+評価対象:
 
-## 2. Markets
+- Rule-based baseline
+- Jev-only
+- ML-only
+- Jev + ML
+- News有無
+- Entry / Exit方式
+- Risk Profile
+- 資金・単元・同時保有数制約
 
-### Japan
+## 2. Current scope: Paper-only
 
-実装を先行する。
+現在のmilestoneでは外部Broker APIを使用しない。
 
-- Realtime / future live execution: kabuステーションAPI
-- Historical / supplementary data: J-Quants
-- News MVP: 無料で利用可能な TDnet 公開情報等
-- Paid TDnet add-on: ニュースの有効性が確認できた後に再検討
+### Explicitly out of scope
 
-### United States
+- kabuステーションAPI
+- moomoo API
+- 証券口座ログイン/認証
+- 実口座残高/position/order取得
+- Shadow Brokerによる証券API接続
+- Live order送信
+- KabuStationBroker / MoomooBroker の具象実装
 
-共通コアが日本株で安定した後に追加する。
+将来拡張のため BrokerAdapter interface は保持してよいが、現在は PaperBroker のみ実装する。
 
-- Realtime / trading: moomoo API
-- News: moomoo news API
+Market data sourceはBroker APIに固定しない。Historical dataset / file / replay adapterを優先し、リアルタイム外部データ源は別途選定されるまで具象実装しない。
 
-市場固有仕様は Adapter 層へ閉じ込め、Core / Strategy / Risk は市場SDKへ直接依存しない。
+## 3. Markets
 
-## 3. Trading horizon and cadence
+研究対象:
+
+- Japan equities
+- US equities
+
+共通Coreを設計し、市場固有情報は InstrumentMetadata / DataAdapter に閉じ込める。
+
+初期実装は取得済み/利用可能なHistorical dataとReplayを中心に進める。
+
+## 4. Trading horizon and cadence
 
 - Primary prediction horizon: 3〜5分
-- Initial decision interval: 15秒
-- MVPでは対象10銘柄すべてを15秒ごとに評価する
-- Jev APIコスト・レイテンシ・rate limit を実測後、必要なら pre-screening / event-driven evaluation を追加する
-- 最初から pre-screening を入れて Jev の評価と混同しない
+- Initial decision interval: 15秒相当
+- 初期対象: 固定10銘柄
+- Replayでも15秒decision cadenceを再現可能にする
 
-## 4. Universe
+## 5. Universe
 
-### Phase 1
-
-固定10銘柄。
+Phase 1は固定10銘柄。
 
 選定条件:
 
-- 十分な流動性
+- 流動性
 - 業種分散
 - 日中ボラティリティ
-- ニュース/開示が比較的観測しやすいこと
+- 必要データが取得可能
 
-株価10万円制約は10銘柄の選定条件にしない。
+10万円制約は銘柄選定条件にしない。
 
-### Expansion
-
+その後:
 1. 固定10銘柄
-2. 日経225等の主要銘柄へ拡張
-3. 出来高・ボラティリティ・値動き等による動的選定
+2. 主要指数銘柄
+3. 動的選定
 
-Phase 1完了後は銘柄ユニバースを月次見直し可能にする。
+Phase 1完了後は月次見直しを可能にする。
 
-## 5. Decision output
-
-DecisionModel は最初から以下を表現する。
+## 6. Decision output
 
 - LONG
 - SHORT
 - HOLD
 
-ただし初期 Live execution は LONG only とする。SHORT signal は捨てずに保存し、Paper では LONG/SHORT Portfolio を別途評価できるようにする。
+PaperではLONG/SHORTを両方評価可能にする。
 
-## 6. Jev input
+## 7. Jev input
 
-Jev へは「最新特徴量 + 短い履歴要約」を渡す。
+Jevへは最新特徴量 + compact short history summaryを渡す。
 
 例:
 
-- return_5s / 30s / 1m / 5m
+- return 5s / 30s / 1m / 5m
 - VWAP distance
 - spread / spread trend
-- order-book imbalance + short-term slope
+- imbalance / slope
 - microprice
-- CVD + short-term trend
+- CVD / trend
 - relative volume
 - realized volatility
 - ML probabilities（ML導入後）
-- NewsState（ニュース導入後）
-- current portfolio state
-- data freshness
+- NewsState（News導入後）
+- virtual portfolio state
+- data quality
 
-生の長い板履歴・ニュース全文を毎回投入しない。
+長い生時系列を毎回渡さない。
 
-## 7. Jev decision schema
-
-最低限:
+## 8. Jev decision schema
 
 - action: LONG / SHORT / HOLD
 - direction_5m: UP / FLAT / DOWN
-- regime: TREND_UP / TREND_DOWN / RANGE / HIGH_VOLATILITY / NEWS_SHOCK
+- regime
 - setup_quality
 - probabilities / confidence
 - optional news_invalidates_signal
 
-Confidence threshold は最初から固定しない。全確率を記録し、Paper data 上で閾値・top-2 margin を比較する。
+Confidence thresholdは事前固定しない。Paper結果からthreshold / top-2 margin別に分析する。
 
-## 8. ML role
+## 9. ML role
 
-MLはシステム成立の必須要件ではない。
+MLはoptional。
 
 実装順:
-
-1. Rule-based baseline
+1. Rule-based
 2. Jev-only
 3. ML-only
-4. Jev + ML integration
+4. Jev + ML
 
-初期モデルは LightGBM を第一候補とし、単純な Logistic Regression 等も baseline として残す。
+ML targets:
 
-### ML targets
+主:
+- cost-adjusted UP / FLAT / DOWN
 
-主タスク:
-- cost-adjusted UP / FLAT / DOWN 3-class classification
+補助:
+- expected_return_bps regression
 
-補助タスク:
-- expected return in bps regression
+Jev+ML比較:
+- A: ML outputをJevへ入力
+- B: JevとMLを独立判断して決定論的統合
+- C: ML screening → Jev secondary decision
 
-出力例:
-- p_up
-- p_flat
-- p_down
-- expected_return_bps
-- calibration metadata
-- model_version
-- trained_until
-
-### Jev + ML integration experiments
-
-以下を同条件で比較する。
-
-A. ML予測を Jev へ渡し、最終判断を Jev が行う  
-B. ML と Jev を独立判断させ、決定論的ルールで統合する  
-C. ML で候補抽出し、Jev が二次判定する  
-
-## 9. News rollout
-
-ニュースは段階導入する。
-
-1. Newsなし
-2. 見出し/短い要約を Jev へ入力
-3. LLM等で構造化した NewsState を Jev へ入力
-
-NewsState 例:
-
-- event_type
-- direction
-- materiality
-- published_at
-- first_seen_at
-- source_count
-- related_symbols
-- confidence
-
-Decision hot path からニュース取得・LLM処理を分離する。
-
-## 10. Portfolio experiments
-
-少なくとも以下を分離する。
-
-### Capital/lot constraints
-
-- Unconstrained: 十分な仮想資金、価格・単元制約なし
-- Theoretical-100k: 総資金10万円、単元制約なし
-- Realistic-100k: 総資金10万円、実際の市場売買単位を反映
-
-日本株・米国株で可能な範囲で同じ比較を行う。
-
-### Concurrent positions
-
-Paper では max_positions = 1 / 3 / 5 / 10 を比較する。
-
-初期 Live は max_positions = 1。
-
-### Position sizing
+## 10. News
 
 段階導入:
 
-1. Equal allocation
-2. Jev confidence-weighted allocation
-3. Live向け risk-based sizing
+1. Newsなし
+2. headline / short summary
+3. structured NewsState
 
-Confidence weighting は calibration の有効性を確認してから利用する。Liveでは confidence だけでサイズを無制限に増やさない。
+ニュースsourceもBroker APIへ依存させない。外部sourceが未確定の場合、Newsなしで先に評価可能にする。
 
-## 11. Entry experiments
+## 11. Paper portfolios
 
-Paper で以下を比較する。
+### Capital / lot
 
-- Market order
-- Limit order
-- Limit → timeout → Market
+- Unconstrained
+- Theoretical-100k
+- Realistic-100k
 
-Live の注文方式は Paper / Shadow の結果から決定する。
+### Concurrent positions
 
-## 12. Exit strategy
+- max_positions = 1 / 3 / 5 / 10
 
-本命は hybrid exit。
-
-- maximum holding time: 原則5分
-- stop-loss
-- take-profit
-- strong opposite signal
-- time-based forced exit
-
-比較用 baseline として fixed 5-minute exit を残す。
-
-Stop-loss / Take-profit は段階導入する。
-
-1. fixed percentage baseline
-2. ATR / realized-volatility based
-3. confidence-aware adjustment（calibration確認後）
-
-## 13. Historical vs Forward evaluation
-
-### Historical Replay
-
-用途:
-
-- data pipeline
-- Feature Engine
-- leakage test
-- PaperBroker
-- ML
-- Jev参考評価
-
-Jev は過去の出来事を学習済みである可能性があるため、Historical result を主要な有効性証拠としない。
-
-### Forward Paper Trading
-
-Jevを含む戦略性能の主評価。
-
-実際の将来のリアルタイム市場を使い、注文は PaperBroker 内だけで約定させる。
-
-Forward Paper から次段階へ進む条件は、単純な期間だけでは決めない。
-
-- minimum evaluation period
-- minimum number of trades
-- multiple market regimes
-
-をすべて満たす。
-
-具体的な日数・trade数は、初期Forward Paperで観測される売買頻度を基に設定する。
-
-## 14. Live rollout
-
-段階を飛ばさない。
-
-1. Historical Replay
-2. Forward Paper
-3. Shadow Live
-4. Minimum-size Live
-5. Expansion requires a separate decision
-
-初期 Live:
-
-- budget <= JPY 100,000 equivalent
-- LONG only
-- max_positions = 1
-- Conservative Risk Profile only
-- explicit symbol allowlist
-- explicit arming required
-
-Paper profitability だけで Live を許可しない。
-
-## 15. Risk profiles
-
-Paper では以下を並列評価する。
+### Risk profiles
 
 - Conservative
 - Balanced
 - Aggressive
 
-Live は Conservative から開始する。
+## 12. Position sizing
 
-Risk Engine は以下を決定論的に制御する。
+1. Equal allocation
+2. confidence-weighted
+3. risk-based sizing
 
-- max position
-- max order notional
-- max daily loss
-- max drawdown
-- max open orders
-- allowed symbols
-- market hours
-- max spread
-- stale data
-- duplicate order
-- cooldown
-- feed / API health
-- circuit breaker
-- kill switch
+Confidence weightingはcalibration確認後。
+
+## 13. Entry experiments
+
+Paperで比較:
+
+- Market
+- Limit
+- Limit → timeout → Market
+
+## 14. Exit strategy
+
+Primary:
+- Hybrid Exit
+
+Components:
+- max holding 5 min
+- stop-loss
+- take-profit
+- strong opposite signal
+- forced time exit
+
+Baseline:
+- fixed 5-minute exit
+
+Stop/TP rollout:
+1. fixed %
+2. ATR / realized-volatility
+3. confidence-aware later
+
+## 15. Historical and Paper evaluation
+
+Historical Replayは以下に使う。
+
+- pipeline検証
+- Feature Engine
+- leakage test
+- PaperBroker
+- ML
+- Jev参考評価
+- Strategy比較
+
+JevのHistorical評価は学習済み知識混入の可能性があるため、参考値として扱う。
+
+外部Broker APIを使わない期間でも、Paper runtimeを完成させ、将来別途選定したリアルタイムdata sourceを差し替えられるようにする。
 
 ## 16. Data rollout
 
-Historical data は段階的に高度化する。
+Stage 1:
+- 取得済み/利用可能な1分足・Tick等でReplay基盤
 
-1. 取得しやすい1分足 / TickでReplay基盤を作る
-2. Realtime運用開始と同時にL2板を継続保存する
-3. 十分な自前L2履歴が蓄積したら板込みHistorical Replayへ拡張する
+Stage 2:
+- 非Brokerの外部market data sourceを別途選定した場合のみRealtime Adapterを追加
 
-Raw data は append-only で保存し、受信時刻と取引所時刻を両方保持する。
+Stage 3:
+- L2 dataが入手可能になった場合にL2-aware replay/featureへ拡張
+
+現在のmilestoneでは「kabuステーション/moomooからL2を取得する」は実装しない。
 
 ## 17. Technical stack
 
-固定する主要要素:
-
 - Python 3.12
 - uv
-- asyncio / WebSocket / httpx
 - Pydantic
 - Polars
 - NumPy
@@ -331,22 +244,19 @@ Raw data は append-only で保存し、受信時刻と取引所時刻を両方�
 - pyright
 - FastAPI
 
-基本的に src layout、unit/integration test 分離、docs、configs、CIを用意する。
+src layout、unit/integration test、docs、configs、CIを用意する。
 
-クラス単位の細かなディレクトリ配置は事前固定しすぎず、Phase 0で設計する。
+## 18. Test gates
 
-## 18. Success criterion
+docs/TEST_GATES.md の5つのTest Gateを必須とする。
+
+後続Issueへ進む前に該当Gateを通過し、結果を記録する。
+
+## 19. Success criterion
 
 「利益が出た」だけでは成功としない。
 
-最低限比較する:
-
-- Rule-based
-- Jev-only
-- ML-only
-- Jev + ML
-
-指標:
+最低限:
 
 - net PnL
 - max drawdown
@@ -358,8 +268,8 @@ Raw data は append-only で保存し、受信時刻と取引所時刻を両方�
 - fill ratio
 - fees
 - slippage
-- decision latency
-- order latency
 - probability calibration
+- replay determinism
+- auditability
 
-最終的には、コスト・Risk・execution制約を含めても Jev の追加価値が存在するかを評価する。
+を評価する。

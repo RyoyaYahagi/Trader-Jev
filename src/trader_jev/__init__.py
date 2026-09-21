@@ -47,6 +47,15 @@ from trader_jev.models import (
     TradeEvent,
     TradeIntent,
 )
+from trader_jev.news import (
+    InMemoryNewsAdapter,
+    NewsFeatureEngine,
+    NewsIntegrationMode,
+    NewsState,
+    NewsStateCache,
+    NewsWorkerConfig,
+    NewsWorkerService,
+)
 from trader_jev.portfolio import (
     FixedTimeExitPolicy,
     HybridExitPolicy,
@@ -92,6 +101,13 @@ __all__ = [
     "MLDecisionModel",
     "MLModelConfig",
     "ModelArtifact",
+    "InMemoryNewsAdapter",
+    "NewsFeatureEngine",
+    "NewsIntegrationMode",
+    "NewsState",
+    "NewsStateCache",
+    "NewsWorkerConfig",
+    "NewsWorkerService",
     "NewsEvent",
     "OrderBookEvent",
     "OrderEvent",

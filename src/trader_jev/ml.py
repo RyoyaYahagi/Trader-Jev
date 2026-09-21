@@ -9,8 +9,9 @@ from collections.abc import Iterable, Sequence
 from datetime import datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
-from typing import Any, Self
+from typing import Any, Self, cast
 
+import numpy as np
 from pydantic import Field, field_validator, model_validator
 
 from trader_jev.interfaces import PredictionModel
@@ -176,6 +177,81 @@ class FeatureVectorizer:
         return number if math.isfinite(number) else 0.0
 
 
+def _training_arrays(
+    dataset: TrainingDataset | Sequence[TrainingExample],
+    trained_until: datetime | None,
+    vectorizer: FeatureVectorizer,
+) -> tuple[datetime, list[tuple[float, ...]], list[int], tuple[float, ...]]:
+    examples = tuple(dataset.examples if isinstance(dataset, TrainingDataset) else dataset)
+    if not examples:
+        raise ValueError("cannot fit ML model without examples")
+    deadline = trained_until or (
+        dataset.trained_until if isinstance(dataset, TrainingDataset) else None
+    )
+    if deadline is None:
+        deadline = max(example.label_available_at or example.as_of for example in examples)
+    if deadline.tzinfo is None or deadline.utcoffset() is None:
+        raise ValueError("trained_until must be timezone-aware")
+    features = [vectorizer.vectorize_example(example) for example in examples]
+    labels = [CLASS_ORDER.index(example.label) for example in examples]
+    returns = [float(example.realized_return_bps) for example in examples]
+    class_returns = tuple(
+        _mean([value for value, label in zip(returns, labels, strict=True) if label == index])
+        for index in range(len(CLASS_ORDER))
+    )
+    return deadline, features, labels, class_returns
+
+
+def _config_hash(config_payload: dict[str, Any]) -> str:
+    return hashlib.sha256(
+        json.dumps(config_payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    ).hexdigest()
+
+
+def _prediction_output(
+    probabilities: Sequence[float],
+    class_returns_bps: Sequence[float],
+    *,
+    model_version: str,
+    trained_until: datetime,
+    feature_schema_version: str,
+    config_hash: str,
+) -> PredictionOutput:
+    if len(probabilities) != len(CLASS_ORDER) or len(class_returns_bps) != len(CLASS_ORDER):
+        raise RuntimeError("ML model returned an unexpected class count")
+    if any(not math.isfinite(value) or value < 0 for value in probabilities):
+        raise RuntimeError("ML model returned invalid probabilities")
+    total = sum(probabilities)
+    if total <= 0:
+        raise RuntimeError("ML model returned zero probability mass")
+    normalized = [value / total for value in probabilities]
+    best = max(range(len(normalized)), key=lambda index: normalized[index])
+    expected = sum(
+        probability * value
+        for probability, value in zip(normalized, class_returns_bps, strict=True)
+    )
+    top_two = sorted(normalized, reverse=True)
+    return PredictionOutput(
+        direction_5m=CLASS_ORDER[best],
+        p_up=Decimal(str(normalized[0])),
+        p_flat=Decimal(str(normalized[1])),
+        p_down=Decimal(str(normalized[2])),
+        expected_return_bps=Decimal(str(expected)),
+        model_version=model_version,
+        trained_until=trained_until,
+        uncertainty=Decimal(str(1.0 - normalized[best])),
+        feature_schema_version=feature_schema_version,
+        calibration_metadata={
+            "config_hash": config_hash,
+            "top_two_margin": top_two[0] - top_two[1],
+        },
+    )
+
+
+def _mean(values: Sequence[float]) -> float:
+    return sum(values) / len(values) if values else 0.0
+
+
 class MLModelConfig(DomainModel):
     model_version: str = Field(default="logistic-baseline-1", min_length=1)
     feature_schema_version: str = Field(default="1.0", min_length=1)
@@ -227,24 +303,8 @@ class LogisticRegressionBaseline(PredictionModel):
         *,
         trained_until: datetime | None = None,
     ) -> ModelArtifact:
-        examples = tuple(dataset.examples if isinstance(dataset, TrainingDataset) else dataset)
-        if not examples:
-            raise ValueError("cannot fit ML model without examples")
-        deadline = trained_until or (
-            dataset.trained_until if isinstance(dataset, TrainingDataset) else None
-        )
-        if deadline is None:
-            deadline = max(example.label_available_at or example.as_of for example in examples)
-        if deadline.tzinfo is None or deadline.utcoffset() is None:
-            raise ValueError("trained_until must be timezone-aware")
-        features = [self.vectorizer.vectorize_example(example) for example in examples]
-        labels = [CLASS_ORDER.index(example.label) for example in examples]
-        returns = [float(example.realized_return_bps) for example in examples]
-        class_returns = tuple(
-            self._mean(
-                [value for value, label in zip(returns, labels, strict=True) if label == index]
-            )
-            for index in range(len(CLASS_ORDER))
+        deadline, features, labels, class_returns = _training_arrays(
+            dataset, trained_until, self.vectorizer
         )
         weights, biases = self._train(features, labels)
         config_payload = {
@@ -252,9 +312,7 @@ class LogisticRegressionBaseline(PredictionModel):
             "feature_names": self.vectorizer.feature_names,
             "class_order": [direction.value for direction in CLASS_ORDER],
         }
-        config_hash = hashlib.sha256(
-            json.dumps(config_payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
-        ).hexdigest()
+        config_hash = _config_hash(config_payload)
         self.artifact = ModelArtifact(
             model_version=self.config.model_version,
             trained_until=deadline,
@@ -279,29 +337,13 @@ class LogisticRegressionBaseline(PredictionModel):
             bias + sum(weight * value for weight, value in zip(row, values, strict=True))
             for row, bias in zip(self.artifact.weights, self.artifact.biases, strict=True)
         ]
-        probabilities = self._softmax(logits)
-        best = max(range(len(probabilities)), key=lambda index: probabilities[index])
-        expected = sum(
-            probability * value
-            for probability, value in zip(
-                probabilities, self.artifact.class_returns_bps, strict=True
-            )
-        )
-        top_two = sorted(probabilities, reverse=True)
-        return PredictionOutput(
-            direction_5m=CLASS_ORDER[best],
-            p_up=Decimal(str(probabilities[0])),
-            p_flat=Decimal(str(probabilities[1])),
-            p_down=Decimal(str(probabilities[2])),
-            expected_return_bps=Decimal(str(expected)),
+        return _prediction_output(
+            self._softmax(logits),
+            self.artifact.class_returns_bps,
             model_version=self.artifact.model_version,
             trained_until=self.artifact.trained_until,
-            uncertainty=Decimal(str(1.0 - probabilities[best])),
             feature_schema_version=self.artifact.feature_schema_version,
-            calibration_metadata={
-                "config_hash": self.artifact.config_hash,
-                "top_two_margin": top_two[0] - top_two[1],
-            },
+            config_hash=self.artifact.config_hash,
         )
 
     def save_artifact(self, path: str | Path) -> Path:
@@ -366,9 +408,183 @@ class LogisticRegressionBaseline(PredictionModel):
         denominator = sum(exponentials)
         return [value / denominator for value in exponentials]
 
-    @staticmethod
-    def _mean(values: Sequence[float]) -> float:
-        return sum(values) / len(values) if values else 0.0
+
+def _load_lightgbm() -> Any:
+    try:
+        import lightgbm
+    except ImportError as exc:
+        raise RuntimeError("LightGBM is not installed; run `uv sync` first") from exc
+    return lightgbm
+
+
+class LightGBMModelConfig(DomainModel):
+    """Deterministic, conservative defaults for the tabular LightGBM baseline."""
+
+    model_version: str = Field(default="lightgbm-baseline-1", min_length=1)
+    feature_schema_version: str = Field(default="1.0", min_length=1)
+    seed: int = 17
+    num_boost_round: int = Field(default=100, gt=0)
+    learning_rate: float = Field(default=0.05, gt=0)
+    num_leaves: int = Field(default=15, gt=1)
+    max_depth: int = Field(default=-1, ge=-1)
+    min_data_in_leaf: int = Field(default=5, gt=0)
+    feature_fraction: float = Field(default=1.0, gt=0, le=1)
+    bagging_fraction: float = Field(default=1.0, gt=0, le=1)
+    bagging_freq: int = Field(default=0, ge=0)
+    l2: float = Field(default=0.001, ge=0)
+
+
+class LightGBMModelArtifact(DomainModel):
+    """Portable LightGBM booster plus the metadata needed for safe replay."""
+
+    model_type: str = "lightgbm"
+    model_version: str
+    trained_until: datetime
+    feature_schema_version: str
+    feature_names: tuple[str, ...]
+    class_order: tuple[Direction, ...] = CLASS_ORDER
+    class_returns_bps: tuple[float, ...]
+    config_hash: str
+    seed: int
+    booster_model: str = Field(min_length=1)
+
+    _time_aware = field_validator("trained_until")(_aware)
+
+
+class LightGBMBaseline(PredictionModel):
+    """LightGBM multiclass baseline for nonlinear tabular market features."""
+
+    def __init__(
+        self,
+        config: LightGBMModelConfig | None = None,
+        *,
+        vectorizer: FeatureVectorizer | None = None,
+    ) -> None:
+        self.config = config or LightGBMModelConfig()
+        self.vectorizer = vectorizer or FeatureVectorizer()
+        self.artifact: LightGBMModelArtifact | None = None
+        self._booster: Any | None = None
+
+    @property
+    def model_version(self) -> str:
+        return self.config.model_version
+
+    @property
+    def trained_until(self) -> datetime | None:
+        return self.artifact.trained_until if self.artifact is not None else None
+
+    def fit(
+        self,
+        dataset: TrainingDataset | Sequence[TrainingExample],
+        *,
+        trained_until: datetime | None = None,
+    ) -> LightGBMModelArtifact:
+        deadline, features, labels, class_returns = _training_arrays(
+            dataset, trained_until, self.vectorizer
+        )
+        lightgbm = _load_lightgbm()
+        train_set = lightgbm.Dataset(
+            np.asarray(features, dtype=float),
+            label=labels,
+            feature_name=list(self.vectorizer.feature_names),
+        )
+        booster = lightgbm.train(
+            self._params(),
+            train_set,
+            num_boost_round=self.config.num_boost_round,
+        )
+        config_payload = {
+            "model": self.config.model_dump(mode="json"),
+            "feature_names": self.vectorizer.feature_names,
+            "class_order": [direction.value for direction in CLASS_ORDER],
+        }
+        artifact = LightGBMModelArtifact(
+            model_version=self.config.model_version,
+            trained_until=deadline,
+            feature_schema_version=self.config.feature_schema_version,
+            feature_names=self.vectorizer.feature_names,
+            class_returns_bps=class_returns,
+            config_hash=_config_hash(config_payload),
+            seed=self.config.seed,
+            booster_model=booster.model_to_string(),
+        )
+        self.artifact = artifact
+        self._booster = booster
+        return artifact
+
+    async def predict(self, snapshot: DecisionSnapshot) -> PredictionOutput:
+        return self.predict_sync(snapshot)
+
+    def predict_sync(self, snapshot: DecisionSnapshot) -> PredictionOutput:
+        artifact = self.artifact
+        if artifact is None:
+            raise RuntimeError("LightGBM model is not fitted")
+        booster = self._require_booster()
+        raw_predictions: Any = booster.predict([self.vectorizer.vectorize(snapshot)])
+        try:
+            probabilities = [float(value) for value in raw_predictions[0]]
+        except (IndexError, TypeError, ValueError) as exc:
+            raise RuntimeError("LightGBM returned an invalid prediction shape") from exc
+        return _prediction_output(
+            probabilities,
+            artifact.class_returns_bps,
+            model_version=artifact.model_version,
+            trained_until=artifact.trained_until,
+            feature_schema_version=artifact.feature_schema_version,
+            config_hash=artifact.config_hash,
+        )
+
+    def save_artifact(self, path: str | Path) -> Path:
+        if self.artifact is None:
+            raise RuntimeError("LightGBM model is not fitted")
+        destination = Path(path)
+        destination.write_text(self.artifact.model_dump_json(indent=2), encoding="utf-8")
+        return destination
+
+    @classmethod
+    def load_artifact(cls, path: str | Path) -> Self:
+        artifact = LightGBMModelArtifact.model_validate_json(Path(path).read_text(encoding="utf-8"))
+        model = cls(
+            LightGBMModelConfig(
+                model_version=artifact.model_version,
+                feature_schema_version=artifact.feature_schema_version,
+                seed=artifact.seed,
+            ),
+            vectorizer=FeatureVectorizer(artifact.feature_names),
+        )
+        model.artifact = artifact
+        model._booster = _load_lightgbm().Booster(model_str=artifact.booster_model)
+        return model
+
+    def _require_booster(self) -> Any:
+        if self._booster is None:
+            if self.artifact is None:
+                raise RuntimeError("LightGBM model is not fitted")
+            self._booster = _load_lightgbm().Booster(model_str=self.artifact.booster_model)
+        return self._booster
+
+    def _params(self) -> dict[str, Any]:
+        return {
+            "objective": "multiclass",
+            "num_class": len(CLASS_ORDER),
+            "metric": "multi_logloss",
+            "learning_rate": self.config.learning_rate,
+            "num_leaves": self.config.num_leaves,
+            "max_depth": self.config.max_depth,
+            "min_data_in_leaf": self.config.min_data_in_leaf,
+            "feature_fraction": self.config.feature_fraction,
+            "bagging_fraction": self.config.bagging_fraction,
+            "bagging_freq": self.config.bagging_freq,
+            "lambda_l2": self.config.l2,
+            "seed": self.config.seed,
+            "feature_fraction_seed": self.config.seed,
+            "bagging_seed": self.config.seed,
+            "data_random_seed": self.config.seed,
+            "num_threads": 1,
+            "verbosity": -1,
+            "deterministic": True,
+            "force_col_wise": True,
+        }
 
 
 class ChronologicalSplitConfig(DomainModel):
@@ -470,8 +686,28 @@ def assert_no_future_leakage(examples: Iterable[TrainingExample]) -> None:
             raise ValueError("training example exposes a label before its feature timestamp")
 
 
+def load_prediction_model(path: str | Path) -> LogisticRegressionBaseline | LightGBMBaseline:
+    """Load either the logistic or LightGBM artifact written by this package."""
+
+    source = Path(path)
+    try:
+        payload = json.loads(source.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise ValueError(f"could not read ML artifact: {source}") from exc
+    if not isinstance(payload, dict):
+        raise ValueError("ML artifact must contain a JSON object")
+    payload = cast(dict[str, Any], payload)
+    if payload.get("model_type") == "lightgbm" or "booster_model" in payload:
+        return LightGBMBaseline.load_artifact(source)
+    if "weights" in payload and "biases" in payload:
+        return LogisticRegressionBaseline.load_artifact(source)
+    raise ValueError("ML artifact type is not recognized")
+
+
 BaselineMLModel = LogisticRegressionBaseline
 MLPredictionModel = LogisticRegressionBaseline
+LightGBMModel = LightGBMBaseline
+LightGBMArtifact = LightGBMModelArtifact
 
 
 __all__ = [
@@ -480,6 +716,11 @@ __all__ = [
     "ChronologicalSplitConfig",
     "FeatureVectorizer",
     "LabelConfig",
+    "LightGBMArtifact",
+    "LightGBMBaseline",
+    "LightGBMModel",
+    "LightGBMModelArtifact",
+    "LightGBMModelConfig",
     "LogisticRegressionBaseline",
     "MLModelConfig",
     "MLPredictionModel",
@@ -490,5 +731,6 @@ __all__ = [
     "brier_score",
     "chronological_split",
     "expected_calibration_error",
+    "load_prediction_model",
     "walk_forward_splits",
 ]

@@ -13,6 +13,11 @@ from trader_jev.ml import (
     ChronologicalSplitConfig,
     FeatureVectorizer,
     LabelConfig,
+    LightGBMArtifact,
+    LightGBMBaseline,
+    LightGBMModel,
+    LightGBMModelArtifact,
+    LightGBMModelConfig,
     LogisticRegressionBaseline,
     MLModelConfig,
     MLPredictionModel,
@@ -23,6 +28,7 @@ from trader_jev.ml import (
     brier_score,
     chronological_split,
     expected_calibration_error,
+    load_prediction_model,
     walk_forward_splits,
 )
 
@@ -34,6 +40,11 @@ __all__ = [
     "JevMLDecisionModel",
     "JevWithMLDecisionModel",
     "LabelConfig",
+    "LightGBMArtifact",
+    "LightGBMBaseline",
+    "LightGBMModel",
+    "LightGBMModelArtifact",
+    "LightGBMModelConfig",
     "LogisticRegressionBaseline",
     "MLDecisionConfig",
     "MLDecisionModel",
@@ -47,5 +58,6 @@ __all__ = [
     "brier_score",
     "chronological_split",
     "expected_calibration_error",
+    "load_prediction_model",
     "walk_forward_splits",
 ]

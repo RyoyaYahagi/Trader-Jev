@@ -21,6 +21,8 @@ from trader_jev.integration import (
 from trader_jev.ml import (
     ChronologicalSplitConfig,
     LabelConfig,
+    LightGBMBaseline,
+    LightGBMModelConfig,
     LogisticRegressionBaseline,
     MLModelConfig,
     TrainingDataset,
@@ -99,6 +101,22 @@ def test_ml_dataset_training_artifact_and_metrics(quote: QuoteEvent, tmp_path: P
     labels = [prediction.direction_5m, Direction.FLAT]
     assert brier_score(predictions, labels) >= 0
     assert expected_calibration_error(predictions, labels) >= 0
+
+    lightgbm = LightGBMBaseline(
+        LightGBMModelConfig(num_boost_round=10, min_data_in_leaf=1, model_version="test-lightgbm")
+    )
+    lightgbm_artifact = lightgbm.fit(dataset)
+    lightgbm_prediction = asyncio.run(lightgbm.predict(snapshots[-1]))
+    assert lightgbm_prediction.model_version == "test-lightgbm"
+    assert lightgbm_prediction.trained_until == lightgbm_artifact.trained_until
+    assert (
+        lightgbm_prediction.p_up is not None
+        and lightgbm_prediction.p_flat is not None
+        and lightgbm_prediction.p_down is not None
+    )
+    lightgbm_path = lightgbm.save_artifact(tmp_path / "lightgbm-model.json")
+    loaded_lightgbm = LightGBMBaseline.load_artifact(lightgbm_path)
+    assert asyncio.run(loaded_lightgbm.predict(snapshots[-1])) == lightgbm_prediction
 
 
 class FakePredictionModel:

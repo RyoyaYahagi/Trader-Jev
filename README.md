@@ -4,7 +4,7 @@ Jev を用いて、テクニカル・板・需給・ニュース・機械学習�
 
 ## Current milestone: Paper-only
 
-現在の実装スコープは **Historical Replay + Paper Trading のみ** です。
+最終的には **Shadow Live → Minimum-size Live → 段階的な実売買** まで進める前提です。ただし、現在の実装milestoneは **Historical Replay + Paper Tradingのみ** とします。
 
 **kabuステーションAPI / moomoo API は現段階では使用しません。**
 
@@ -16,7 +16,7 @@ Jev を用いて、テクニカル・板・需給・ニュース・機械学習�
 - 実注文、Shadow注文、口座残高/position取得
 - Live Broker Adapter の具象実装
 
-将来の実売買へ拡張しやすい interface は維持してよいですが、現在のIssueでは外部Brokerへ接続しません。
+将来のLive移行はプロジェクトの正式なロードマップに残します。ただし現在のmilestoneでは外部Brokerへ接続せず、Live/Shadow用Issueは deferred とします。BrokerAdapter interface は将来拡張を前提に維持します。
 
 ## Project goals
 
@@ -35,7 +35,7 @@ Jev を用いて、テクニカル・板・需給・ニュース・機械学習�
 - Markets: Japan / US を研究対象とする
 - Direction model: LONG / SHORT / HOLD
 - Execution: PaperBroker only
-- Live trading: out of scope
+- Live trading: future milestone（現在は未実装）
 - Main validation: Historical Replay と Paper Trading
 
 ## Documents
@@ -79,3 +79,17 @@ Jev / ML / Strategy からPaperBrokerを直接呼び出してはいけません�
 次Phaseへ進む前に、docs/TEST_GATES.md の5つのTest Gateを通過すること。
 
 Gate未通過の状態で後続Issueを「完了」とみなさない。
+
+
+## Long-term roadmap
+
+```text
+Historical Replay
+  → Paper Trading
+  → Long-running Forward Paper
+  → [Future milestone] Shadow Live
+  → [Future milestone] Minimum-size Live
+  → [Future milestone] Explicit expansion decision
+```
+
+現在はPaper段階に集中しますが、設計は将来のLive移行を妨げないものにします。

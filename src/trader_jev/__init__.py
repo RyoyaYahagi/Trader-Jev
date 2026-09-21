@@ -1,5 +1,6 @@
 """Trader-Jev core domain and execution boundaries."""
 
+from trader_jev.clock import LiveClock, ReplayClock, SystemClock
 from trader_jev.models import (
     Action,
     BarEvent,
@@ -12,9 +13,23 @@ from trader_jev.models import (
     OrderIntent,
     PredictionOutput,
     QuoteEvent,
+    ReplayEvent,
     RiskDecision,
     TradeEvent,
     TradeIntent,
+)
+from trader_jev.replay import (
+    PointInTimeViolation,
+    ReplayConfig,
+    ReplayEngine,
+    ReplayError,
+    ReplayMarketDataAdapter,
+    ReplaySubscription,
+    available_news,
+    event_available_at,
+    merge_replay_events,
+    validate_event_point_in_time,
+    validate_prediction_metadata,
 )
 
 __all__ = [
@@ -32,6 +47,21 @@ __all__ = [
     "RiskDecision",
     "TradeEvent",
     "TradeIntent",
+    "LiveClock",
+    "PointInTimeViolation",
+    "ReplayError",
+    "ReplayEvent",
+    "ReplayClock",
+    "ReplayConfig",
+    "ReplayEngine",
+    "ReplayMarketDataAdapter",
+    "ReplaySubscription",
+    "SystemClock",
+    "available_news",
+    "event_available_at",
+    "merge_replay_events",
+    "validate_event_point_in_time",
+    "validate_prediction_metadata",
 ]
 
 __version__ = "0.1.0"

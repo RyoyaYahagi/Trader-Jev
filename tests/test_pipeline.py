@@ -2,15 +2,17 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import AsyncIterator, Sequence
+from datetime import timedelta
 
 import pytest
 
-from trader_jev.clock import FixedClock
+from trader_jev.clock import FixedClock, ReplayClock
 from trader_jev.features import InMemoryFeatureEngine
 from trader_jev.interfaces import PredictionModel
 from trader_jev.models import (
     Action,
     DecisionSnapshot,
+    Direction,
     InstrumentMetadata,
     MarketEvent,
     OrderEvent,
@@ -75,6 +77,15 @@ class ErrorPredictionModel:
         raise RuntimeError("prediction failed")
 
 
+class FutureMetadataPredictionModel:
+    async def predict(self, snapshot: DecisionSnapshot) -> PredictionOutput:
+        return PredictionOutput(
+            direction_5m=Direction.UP,
+            model_version="future-test",
+            trained_until=snapshot.as_of + timedelta(seconds=1),
+        )
+
+
 class FakeBroker:
     def __init__(self) -> None:
         self.submitted: list[OrderIntent] = []
@@ -113,6 +124,7 @@ def make_pipeline(
     prediction_model: PredictionModel | None = None,
     risk_config: RiskConfig | None = None,
     pipeline_config: PipelineConfig | None = None,
+    clock: ReplayClock | None = None,
 ) -> TradingPipeline:
     return TradingPipeline(
         feature_engine=InMemoryFeatureEngine(),
@@ -125,6 +137,7 @@ def make_pipeline(
         ),
         broker_adapter=broker,
         config=pipeline_config,
+        clock=clock,
     )
 
 
@@ -197,6 +210,26 @@ async def test_prediction_error_fails_closed(
     result = await pipeline.process_event(quote)
 
     assert result.failure_code == "PREDICTION_MODEL_ERROR"
+    assert broker.submitted == []
+
+
+@pytest.mark.asyncio
+async def test_future_prediction_metadata_fails_closed(
+    instrument: InstrumentMetadata,
+    quote: QuoteEvent,
+) -> None:
+    broker = FakeBroker()
+    pipeline = make_pipeline(
+        instrument,
+        FakeDecisionModel(),
+        broker,
+        prediction_model=FutureMetadataPredictionModel(),
+        clock=ReplayClock(NOW),
+    )
+
+    result = await pipeline.process_event(quote)
+
+    assert result.failure_code == "PREDICTION_METADATA_FROM_FUTURE"
     assert broker.submitted == []
 
 

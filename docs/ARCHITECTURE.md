@@ -154,6 +154,17 @@ InstrumentMetadata:
 
 strategy logicからsystem wall clockを直接参照しない。
 
+Replayは次の契約で実行する。
+
+- eventのmerge/orderは市場eventの`received_at`、NewsEventの`published_at`・`first_seen_at`・`received_at`を反映したavailability timestamp順とする
+- `start <= availability timestamp < end`の半開区間で再生する
+- speedは`1x`、`Nx`、`max`を受け付け、同一config・seedでは同じ順序を返す
+- market / symbol filterとevent subscriptionはReplayEngineで適用する
+- ReplayClockはeventのavailability timestampまで進み、strategy / FeatureEngine / News / MLはClockより未来の値を参照しない
+- `PredictionOutput.trained_until`がreplay時点より未来の場合はfail closedする
+
+`TradingPipeline`とRiskEngineには同じ`Clock`実装を注入できる。Historical ReplayではReplayClock、将来のrealtime runtimeではLiveClockを使い、strategyのコードは変更しない。
+
 ## 8. Storage
 
 Raw:

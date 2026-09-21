@@ -371,4 +371,5 @@ class FillEvent(DomainModel):
 
 
 MarketEvent = QuoteEvent | TradeEvent | OrderBookEvent | BarEvent
+ReplayEvent = MarketEvent | NewsEvent
 LedgerEvent = OrderEvent | FillEvent

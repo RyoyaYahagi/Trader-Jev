@@ -12,6 +12,7 @@ from pydantic import Field
 
 from trader_jev.interfaces import (
     BrokerAdapter,
+    Clock,
     DecisionModel,
     FeatureEngine,
     MarketDataAdapter,
@@ -28,6 +29,11 @@ from trader_jev.models import (
     PredictionOutput,
     RiskDecision,
     TradeIntent,
+)
+from trader_jev.replay import (
+    PointInTimeViolation,
+    validate_event_point_in_time,
+    validate_prediction_metadata,
 )
 
 
@@ -73,6 +79,7 @@ class TradingPipeline:
         prediction_model: PredictionModel | None = None,
         config: PipelineConfig | None = None,
         logger: logging.Logger | None = None,
+        clock: Clock | None = None,
     ) -> None:
         self._feature_engine = feature_engine
         self._decision_model = decision_model
@@ -81,6 +88,7 @@ class TradingPipeline:
         self._prediction_model = prediction_model
         self._config = config or PipelineConfig()
         self._logger = logger or logging.getLogger("trader_jev.pipeline")
+        self._clock = clock
 
     async def process_event(
         self,
@@ -94,9 +102,23 @@ class TradingPipeline:
             cash=Decimal("0"),
         )
 
+        as_of = self._clock.now() if self._clock is not None else event.received_at
+        try:
+            validate_event_point_in_time(event, as_of)
+        except PointInTimeViolation as exc:
+            self._logger.error(
+                "market_event_from_future",
+                extra={"event_id": str(event.event_id), "as_of": as_of.isoformat()},
+            )
+            return PipelineResult(
+                event_id=event.event_id,
+                failure_code="POINT_IN_TIME_VIOLATION",
+                failure_reason=str(exc),
+            )
+
         try:
             self._feature_engine.update(event)
-            snapshot = self._feature_engine.snapshot(event.instrument, event.received_at)
+            snapshot = self._feature_engine.snapshot(event.instrument, as_of)
         except Exception as exc:
             self._logger.exception("feature_engine_error", extra={"event_id": str(event.event_id)})
             return PipelineResult(
@@ -112,6 +134,7 @@ class TradingPipeline:
                     self._prediction_model.predict(snapshot),
                     timeout=self._config.prediction_timeout_seconds,
                 )
+                validate_prediction_metadata(prediction, snapshot.as_of)
             except Exception as exc:
                 self._logger.exception(
                     "prediction_model_error",
@@ -123,7 +146,11 @@ class TradingPipeline:
                 return PipelineResult(
                     event_id=event.event_id,
                     snapshot=snapshot,
-                    failure_code="PREDICTION_MODEL_ERROR",
+                    failure_code=(
+                        "PREDICTION_METADATA_FROM_FUTURE"
+                        if isinstance(exc, PointInTimeViolation)
+                        else "PREDICTION_MODEL_ERROR"
+                    ),
                     failure_reason=str(exc),
                 )
 
@@ -164,6 +191,25 @@ class TradingPipeline:
                 trade_intent=trade_intent,
                 failure_code="DECISION_SNAPSHOT_MISMATCH",
                 failure_reason="decision model returned an intent for another snapshot",
+            )
+
+        if trade_intent.created_at > snapshot.as_of:
+            self._logger.error(
+                "decision_created_in_future",
+                extra={
+                    "event_id": str(event.event_id),
+                    "snapshot_id": str(snapshot.snapshot_id),
+                    "created_at": trade_intent.created_at.isoformat(),
+                    "as_of": snapshot.as_of.isoformat(),
+                },
+            )
+            return PipelineResult(
+                event_id=event.event_id,
+                snapshot=snapshot,
+                prediction=prediction,
+                trade_intent=trade_intent,
+                failure_code="DECISION_FROM_FUTURE",
+                failure_reason="decision intent was created after the replay snapshot",
             )
 
         try:

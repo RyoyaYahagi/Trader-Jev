@@ -121,10 +121,13 @@ Paper:
 
 1. Historical Replay
 2. Paper E2E
-3. Long-running Paper validation
+3. Long-running Forward Paper validation
 4. Dashboard / audit / reproducibility validation
+5. **Future milestone:** Shadow Live
+6. **Future milestone:** Minimum-size Live
+7. **Future milestone:** explicit expansion decision
 
-Live / Shadow / broker API integrationは別milestone。
+Live / Shadow / broker API integrationは将来実施する前提だが、現在のmilestoneでは未実装。
 
 ## Test gates
 
@@ -141,4 +144,4 @@ Gateを通過せずに後続Phaseを「完了」にしない。
 - exact Paper minimum days/trades
 - exact Risk Profile numeric limits
 - when to enable pre-screening
-- whether/when to start a future Live milestone
+- PaperからFuture Live milestoneへ進む具体的な時期・定量ゲート

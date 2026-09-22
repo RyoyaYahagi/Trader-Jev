@@ -22,6 +22,7 @@ dependencies = [
 [project.scripts]
 trader-jev-paper = "trader_jev.cli:main"
 trader-jev-train = "trader_jev.ml_cli:main"
+trader-jev-forward-paper = "trader_jev.forward_paper:main"
 
 [dependency-groups]
 dev = [

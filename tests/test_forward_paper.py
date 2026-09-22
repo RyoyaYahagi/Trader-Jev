@@ -7,7 +7,14 @@ from decimal import Decimal
 import pytest
 
 from trader_jev.clock import FixedClock
-from trader_jev.forward_paper import ForwardPaperConfig, ForwardPaperRunner, build_us_instruments
+from trader_jev.forward_paper import (
+    CapitalScenario,
+    ForwardPaperConfig,
+    ForwardPaperRunner,
+    ParallelForwardPaperRunner,
+    build_capital_scenarios,
+    build_us_instruments,
+)
 from trader_jev.models import ExecutionMode, InstrumentMetadata, MarketEvent, QuoteEvent
 
 NOW = datetime(2026, 9, 21, 14, 0, tzinfo=UTC)
@@ -99,3 +106,69 @@ async def test_forward_paper_fails_closed_when_no_quotes_arrive() -> None:
 def test_forward_paper_rejects_duplicate_symbols() -> None:
     with pytest.raises(ValueError, match="duplicates"):
         ForwardPaperConfig(symbols=("AAPL", "aapl"))
+
+
+@pytest.mark.asyncio
+async def test_parallel_forward_paper_forks_one_stream_into_capital_scenarios() -> None:
+    instrument = build_us_instruments(("AAPL",))[0]
+    market_data = FakeMarketData(
+        (
+            quote(instrument, event_time=NOW - timedelta(seconds=31), mid=Decimal("100")),
+            quote(instrument, event_time=NOW, mid=Decimal("101")),
+        )
+    )
+    scenarios = (
+        CapitalScenario(
+            scenario_id="100k",
+            label="10万制約",
+            initial_capital=Decimal("100000"),
+            capital_constraint=Decimal("100000"),
+        ),
+        CapitalScenario(
+            scenario_id="250k",
+            label="25万制約",
+            initial_capital=Decimal("250000"),
+            capital_constraint=Decimal("250000"),
+        ),
+    )
+    runner = ParallelForwardPaperRunner(
+        ForwardPaperConfig(
+            symbols=("AAPL",),
+            runtime_seconds=60,
+            decision_cadence_seconds=0,
+            max_positions=1,
+            market_hours_only=False,
+        ),
+        scenarios=scenarios,
+        market_data=market_data,
+        clock=FixedClock(NOW),
+    )
+
+    summaries = await runner.run()
+
+    assert market_data.instruments == (instrument,)
+    assert [summary.run_config["scenario_label"] for summary in summaries] == [
+        "10万制約",
+        "25万制約",
+    ]
+    assert [summary.portfolio.initial_capital for summary in summaries] == [
+        Decimal("100000"),
+        Decimal("250000"),
+    ]
+    assert all(summary.status == "COMPLETED" for summary in summaries)
+    assert summaries[0].fills == 2
+    assert summaries[1].fills == 1
+    assert summaries[1].portfolio.positions == {"AAPL": 1000}
+
+
+def test_capital_scenario_parser_supports_requested_labels() -> None:
+    scenarios = build_capital_scenarios(("10万", "25万", "50万", "制約なし"))
+
+    assert [scenario.scenario_id for scenario in scenarios] == [
+        "100k",
+        "250k",
+        "500k",
+        "unconstrained",
+    ]
+    assert scenarios[-1].capital_constraint is None
+    assert scenarios[-1].initial_capital == Decimal("1000000")

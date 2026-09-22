@@ -16,6 +16,7 @@ from trader_jev.dashboard_server import (
     dashboard_payload,
 )
 from trader_jev.forward_paper import ForwardPaperSummary, build_us_instruments
+from trader_jev.jev_usage import JevUsageRecord, summarize_usage
 from trader_jev.models import Action, FillEvent, PortfolioState
 
 NOW = datetime(2026, 9, 22, 13, 30, tzinfo=UTC)
@@ -99,6 +100,42 @@ def test_report_store_rejects_path_traversal(tmp_path: Path) -> None:
 
     with pytest.raises(RuntimeError, match="invalid report name"):
         store.load("../forward-paper-test.json")
+
+
+def test_report_store_aggregates_jev_cost_by_period(tmp_path: Path) -> None:
+    record = JevUsageRecord(
+        occurred_at=NOW,
+        request_id="request-1",
+        success=True,
+        input_tokens=100,
+        output_tokens=50,
+        total_tokens=150,
+        estimated_cost=Decimal("0.25"),
+        cost_status="ESTIMATED",
+    )
+    summary = make_summary().model_copy(
+        update={
+            "jev_usage": summarize_usage((record,)),
+            "jev_usage_records": (record,),
+            "run_config": {
+                "execution_mode": "PAPER",
+                "scenario_id": "100k",
+                "scenario_label": "10万制約",
+            },
+        }
+    )
+    (tmp_path / "forward-paper-20260922T133000Z-100k.json").write_text(
+        json.dumps(summary.model_dump(mode="json"), ensure_ascii=False),
+        encoding="utf-8",
+    )
+
+    costs = ReportStore(tmp_path).cost_summary(reference_time=NOW)
+
+    assert costs["daily"]["request_count"] == 1
+    assert costs["daily"]["total_tokens"] == 150
+    assert costs["daily"]["estimated_cost"] == "0.25"
+    assert costs["weekly"]["request_count"] == 1
+    assert costs["monthly"]["request_count"] == 1
 
 
 def test_dashboard_http_endpoints_are_read_only(tmp_path: Path) -> None:

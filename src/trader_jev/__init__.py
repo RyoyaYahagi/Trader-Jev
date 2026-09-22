@@ -60,6 +60,7 @@ from trader_jev.integration import (
     MLDecisionModel,
 )
 from trader_jev.jev_http import JevHttpClient, JevHttpClientConfig, JevHttpError
+from trader_jev.jev_usage import JevPricingConfig, JevUsageRecord, JevUsageSummary
 from trader_jev.jquants import JQuantsApiError, JQuantsClientConfig, JQuantsMinuteBarAdapter
 from trader_jev.ml import (
     FeatureVectorizer,
@@ -185,6 +186,9 @@ __all__ = [
     "JevHttpClient",
     "JevHttpClientConfig",
     "JevHttpError",
+    "JevPricingConfig",
+    "JevUsageRecord",
+    "JevUsageSummary",
     "JQuantsApiError",
     "JQuantsClientConfig",
     "JQuantsMinuteBarAdapter",

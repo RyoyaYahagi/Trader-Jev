@@ -54,6 +54,7 @@ class JevDecision(DomainModel):
     model_version: str = Field(default="jev", min_length=1)
     input_schema_version: str = Field(default="1.0", min_length=1)
     latency_ms: int | None = Field(default=None, ge=0)
+    usage: Mapping[str, Any] | None = None
 
     @model_validator(mode="after")
     def validate_margin(self) -> JevDecision:

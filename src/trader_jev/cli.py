@@ -32,6 +32,13 @@ from trader_jev.features import InMemoryFeatureEngine
 from trader_jev.integration import IntegrationMode, JevMLDecisionModel, MLDecisionModel
 from trader_jev.interfaces import DecisionModel, MarketDataAdapter
 from trader_jev.jev_http import JevHttpClient
+from trader_jev.jev_usage import (
+    JevPricingConfig,
+    JevUsageRecord,
+    JevUsageSummary,
+    summarize_usage,
+    usage_records_from_audits,
+)
 from trader_jev.ml import load_prediction_model
 from trader_jev.models import (
     BarEvent,
@@ -65,6 +72,8 @@ class PaperRunSummary(DomainModel):
     fills: int = Field(ge=0)
     portfolio: PortfolioState
     data_stats: Mapping[str, Any]
+    jev_usage: JevUsageSummary = Field(default_factory=JevUsageSummary)
+    jev_usage_records: tuple[JevUsageRecord, ...] = ()
     run_config: Mapping[str, Any]
 
 
@@ -232,17 +241,17 @@ async def run_paper(
         clock=clock,
     )
     jev_model_instance: JevDecisionModel | None = None
+    jev_adapter: JevDecisionAdapter | None = None
     if jev_client is not None:
-        jev_model_instance = JevDecisionModel(
-            JevDecisionAdapter(
-                jev_client,
-                config=JevAdapterConfig(
-                    timeout_seconds=jev_timeout,
-                    model_version=jev_model,
-                ),
-                clock=clock,
-            )
+        jev_adapter = JevDecisionAdapter(
+            jev_client,
+            config=JevAdapterConfig(
+                timeout_seconds=jev_timeout,
+                model_version=jev_model,
+            ),
+            clock=clock,
         )
+        jev_model_instance = JevDecisionModel(jev_adapter)
     decision_model: DecisionModel
     if ml_mode == "ML_ONLY":
         if prediction_model is None:
@@ -297,6 +306,12 @@ async def run_paper(
     else:
         data_stats = {"source": "synthetic"}
 
+    jev_pricing = JevPricingConfig.from_env(env)
+    jev_usage_records = (
+        usage_records_from_audits(jev_adapter.audit_records, jev_pricing)
+        if jev_adapter is not None
+        else ()
+    )
     summary = PaperRunSummary(
         source=source_name,
         events_processed=processed,
@@ -316,6 +331,8 @@ async def run_paper(
         fills=len(ledger.fills),
         portfolio=ledger.state,
         data_stats=data_stats,
+        jev_usage=summarize_usage(jev_usage_records),
+        jev_usage_records=jev_usage_records,
         run_config={
             "start": args.start.isoformat(),
             "end": args.end.isoformat(),
@@ -332,6 +349,7 @@ async def run_paper(
             "ml_model_version": (
                 prediction_model.model_version if prediction_model is not None else None
             ),
+            "jev_pricing": jev_pricing.model_dump(mode="json"),
         },
     )
     return summary

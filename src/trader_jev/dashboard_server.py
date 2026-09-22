@@ -11,14 +11,17 @@ import argparse
 import json
 import logging
 from collections.abc import Mapping, Sequence
+from datetime import UTC, date, datetime, timedelta
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any, cast
 from urllib.parse import parse_qs, urlparse
+from zoneinfo import ZoneInfo
 
 from pydantic import ValidationError
 
 from trader_jev.forward_paper import ForwardPaperSummary
+from trader_jev.jev_usage import JevUsageRecord, JevUsageSummary, summarize_usage
 
 # The embedded HTML/CSS/JavaScript is intentionally kept in one local asset.
 # Ruff's line-length check is not useful inside that browser asset.
@@ -86,9 +89,100 @@ class ReportStore:
                     "fills": summary.fills,
                     "positions": len(summary.portfolio.positions),
                     "open_orders": summary.portfolio.open_orders,
+                    "scenario_id": summary.run_config.get("scenario_id", "single"),
+                    "scenario_label": summary.run_config.get("scenario_label", "単一条件"),
+                    "initial_capital": str(summary.portfolio.initial_capital),
                 }
             )
         return tuple(entries)
+
+    def cost_summary(
+        self,
+        *,
+        reference_time: datetime | None = None,
+        timezone_name: str = "Asia/Tokyo",
+    ) -> dict[str, Any]:
+        """Aggregate JEV usage for the latest usage day, week, and month."""
+
+        try:
+            timezone = ZoneInfo(timezone_name)
+        except Exception as exc:
+            raise DashboardReportError(f"invalid dashboard timezone: {timezone_name}") from exc
+        records = self._usage_records()
+        if records:
+            anchor = max(record.occurred_at for record in records).astimezone(timezone)
+        else:
+            current = reference_time or datetime.now(UTC)
+            if current.tzinfo is None or current.utcoffset() is None:
+                raise DashboardReportError("reference_time must be timezone-aware")
+            anchor = current.astimezone(timezone)
+        anchor_date = anchor.date()
+        day_start = anchor_date
+        week_start = anchor_date - timedelta(days=anchor_date.weekday())
+        month_start = anchor_date.replace(day=1)
+
+        def period_payload(start: date, end: date) -> dict[str, Any]:
+            selected = tuple(
+                record
+                for record in records
+                if start <= record.occurred_at.astimezone(timezone).date() < end
+            )
+            summary = summarize_usage(selected)
+            payload = summary.model_dump(mode="json")
+            payload["period_start"] = start.isoformat()
+            payload["period_end"] = (end - timedelta(days=1)).isoformat()
+            return payload
+
+        next_month = (
+            month_start.replace(year=month_start.year + 1, month=1)
+            if month_start.month == 12
+            else month_start.replace(month=month_start.month + 1)
+        )
+        return {
+            "timezone": timezone_name,
+            "anchor_at": anchor.isoformat(),
+            "daily": period_payload(day_start, day_start + timedelta(days=1)),
+            "weekly": period_payload(week_start, week_start + timedelta(days=7)),
+            "monthly": period_payload(month_start, next_month),
+        }
+
+    def _usage_records(self) -> tuple[JevUsageRecord, ...]:
+        records: list[JevUsageRecord] = []
+        if not self.report_dir.is_dir():
+            return ()
+        for path in self.report_dir.glob("*.json"):
+            try:
+                payload = json.loads(path.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError):
+                continue
+            if not isinstance(payload, Mapping):
+                continue
+            mapping = cast(Mapping[str, Any], payload)
+            raw_records = mapping.get("jev_usage_records")
+            parsed_records = _parse_usage_records(raw_records)
+            if parsed_records:
+                records.extend(parsed_records)
+                continue
+            summary = _parse_usage_summary(mapping.get("jev_usage"))
+            if summary is None or summary.request_count == 0:
+                continue
+            occurred_at = _report_timestamp(mapping)
+            if occurred_at is None:
+                continue
+            records.append(
+                JevUsageRecord(
+                    occurred_at=occurred_at,
+                    request_id=f"{path.name}:summary",
+                    success=summary.failed_request_count == 0,
+                    input_tokens=summary.input_tokens,
+                    output_tokens=summary.output_tokens,
+                    total_tokens=summary.total_tokens,
+                    estimated_cost=summary.estimated_cost,
+                    currency=summary.currency,
+                    cost_status=summary.cost_status,
+                )
+            )
+        return tuple(sorted(records, key=lambda record: record.occurred_at))
 
     def _safe_path(self, name: str) -> Path:
         candidate = Path(name)
@@ -160,6 +254,13 @@ def dashboard_payload(name: str, summary: ForwardPaperSummary) -> dict[str, Any]
         "fill_events": fills,
         "order_intents": order_intents,
         "order_events": order_events,
+        "jev_usage": summary.jev_usage.model_dump(mode="json"),
+        "capital_condition": {
+            "scenario_id": summary.run_config.get("scenario_id", "single"),
+            "label": summary.run_config.get("scenario_label", "単一条件"),
+            "initial_capital": str(portfolio.initial_capital),
+            "capital_constraint": summary.run_config.get("capital_constraint"),
+        },
         "run_config": dict(summary.run_config),
     }
 
@@ -185,6 +286,8 @@ def create_server(
                     self._send_json({"status": "ok"})
                 elif request.path == "/api/reports":
                     self._send_json({"reports": store.index()})
+                elif request.path == "/api/costs":
+                    self._send_json(store.cost_summary())
                 elif request.path in {"/api/latest", "/api/report"}:
                     query = parse_qs(request.query)
                     requested = query.get("name", [None])[0]
@@ -276,6 +379,49 @@ def _model_or_mapping(value: Any) -> dict[str, Any]:
     return {"value": str(value)}
 
 
+def _parse_usage_records(value: Any) -> tuple[JevUsageRecord, ...]:
+    if not isinstance(value, Sequence) or isinstance(value, (str, bytes, bytearray)):
+        return ()
+    values = cast(Sequence[Any], value)
+    records: list[JevUsageRecord] = []
+    for item in values:
+        if not isinstance(item, Mapping):
+            continue
+        try:
+            records.append(JevUsageRecord.model_validate(item))
+        except ValidationError:
+            continue
+    return tuple(records)
+
+
+def _parse_usage_summary(value: Any) -> JevUsageSummary | None:
+    if not isinstance(value, Mapping):
+        return None
+    try:
+        return JevUsageSummary.model_validate(value)
+    except ValidationError:
+        return None
+
+
+def _report_timestamp(payload: Mapping[str, Any]) -> datetime | None:
+    candidates: list[Any] = [payload.get("finished_at"), payload.get("started_at")]
+    run_config = payload.get("run_config")
+    if isinstance(run_config, Mapping):
+        config = cast(Mapping[str, Any], run_config)
+        candidates.extend((config.get("end"), config.get("start")))
+    for value in candidates:
+        if not isinstance(value, str):
+            continue
+        try:
+            parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+        except ValueError:
+            continue
+        if parsed.tzinfo is None or parsed.utcoffset() is None:
+            parsed = parsed.replace(tzinfo=UTC)
+        return parsed
+    return None
+
+
 def _port(value: str) -> int:
     try:
         parsed = int(value)
@@ -322,6 +468,7 @@ DASHBOARD_HTML = """<!doctype html>
     th { color: var(--muted); font-size: 12px; font-weight: 600; }
     .positive { color: var(--good); }
     .negative { color: var(--bad); }
+    .note { color: var(--muted); margin-top: 8px; }
     .alert { border: 1px solid #705a26; background: #2a2311; color: #f6d98c; border-radius: 8px; padding: 10px 12px; margin-bottom: 16px; }
     .alert div { margin: 2px 0; }
     .empty { color: var(--muted); padding: 12px 0; }
@@ -337,6 +484,7 @@ DASHBOARD_HTML = """<!doctype html>
       <div id="run-meta" class="muted">レポートを読み込んでいます...</div>
     </div>
     <div class="toolbar">
+      <label for="report-select" class="muted">資金条件</label>
       <select id="report-select" aria-label="表示するレポート"></select>
       <button id="refresh" type="button">更新</button>
       <span id="status" class="status empty">読込中</span>
@@ -354,6 +502,7 @@ DASHBOARD_HTML = """<!doctype html>
   <div class="grid">
     <section class="panel"><h2>ポジション</h2><div id="positions"></div></section>
     <section class="panel"><h2>実行状況</h2><div id="execution"></div></section>
+    <section class="panel wide"><h2>Jev使用料金（全条件の合計）</h2><div id="jev-costs"></div><div class="note">Jevは判断モデルの呼出しです。単価が未設定の場合、トークン数だけを表示して金額を推定しません。</div></section>
     <section class="panel wide"><h2>仮想約定履歴</h2><div id="fills-table"></div></section>
   </div>
 </main>
@@ -382,7 +531,9 @@ function render(data) {
   setValue('realized-pnl', signed(p.realized_pnl), Number(p.realized_pnl || 0) >= 0 ? 'positive' : 'negative');
   setValue('unrealized-pnl', signed(p.unrealized_pnl), Number(p.unrealized_pnl || 0) >= 0 ? 'positive' : 'negative');
   setValue('fills', integer(data.fills)); setValue('events', integer(data.events_processed));
-  $('run-meta').textContent = `${data.report_name} · ${data.started_at} ～ ${data.finished_at} · 初期資金 ${money(p.initial_capital)} USD`;
+  const condition = data.capital_condition || {}; const conditionLabel = condition.label || '単一条件';
+  const constraint = condition.capital_constraint ? ` · 制約 ${money(condition.capital_constraint)} USD` : ' · 資金上限なし';
+  $('run-meta').textContent = `${conditionLabel}${constraint} · ${data.started_at} ～ ${data.finished_at} · 開始資金 ${money(p.initial_capital)} USD`;
   const status = $('status'); status.textContent = data.status; status.className = 'status ' + String(data.status || '').toLowerCase();
   const alerts = $('alerts'); alerts.replaceChildren(); (data.alerts || []).forEach((message) => { const e = document.createElement('div'); e.className = 'alert'; e.textContent = '注意: ' + message; alerts.appendChild(e); });
   const positionRows = (data.positions || []).map((x) => [x.symbol, x.side, integer(x.quantity), money(x.average_price), money(x.current_price), [signed(x.unrealized_pnl), Number(x.unrealized_pnl) >= 0 ? 'positive' : 'negative']]);
@@ -392,16 +543,32 @@ function render(data) {
   const fillRows = (data.fill_events || []).slice().reverse().map((x) => [x.occurred_at, x.instrument?.symbol || '—', x.side || '—', integer(x.quantity), money(x.price), money(x.fees)]);
   $('fills-table').replaceChildren(table(['約定時刻', '銘柄', '売買', '数量', '価格', '手数料'], fillRows));
 }
+function costAmount(item) {
+  if (!item || item.request_count === 0) return 'Jev呼出なし';
+  if (item.estimated_cost === null || item.estimated_cost === undefined) return '単価未設定';
+  const prefix = item.cost_status === 'ESTIMATED' ? '推定 ' : '';
+  return prefix + money(item.estimated_cost) + ' USD';
+}
+function renderCosts(data) {
+  if (!data) { $('jev-costs').replaceChildren(); return; }
+  const rows = ['daily', 'weekly', 'monthly'].map((period) => {
+    const item = data[period] || {}; const label = period === 'daily' ? '日次' : period === 'weekly' ? '週次' : '月次';
+    return [label, `${item.period_start || '—'} ～ ${item.period_end || '—'}`, integer(item.request_count), integer(item.total_tokens), costAmount(item)];
+  });
+  $('jev-costs').replaceChildren(table(['集計単位', '対象期間', '呼出回数', '総トークン数', '料金'], rows));
+}
 async function loadReports(selected) {
   const response = await fetch('/api/reports', {cache: 'no-store'}); const payload = await response.json(); const select = $('report-select');
-  const current = selected || select.value; select.replaceChildren(); (payload.reports || []).forEach((x) => { const option = document.createElement('option'); option.value = x.name; option.textContent = `${x.name} (${x.status})`; select.appendChild(option); });
+  const current = selected || select.value; select.replaceChildren(); (payload.reports || []).forEach((x) => { const option = document.createElement('option'); option.value = x.name; option.textContent = `${x.scenario_label || '単一条件'} · ${x.name} (${x.status})`; select.appendChild(option); });
   if (current && [...select.options].some((x) => x.value === current)) select.value = current;
   return select.value;
 }
 async function load(selected) {
   try {
-    const name = await loadReports(selected); const url = name ? '/api/report?name=' + encodeURIComponent(name) : '/api/latest'; const response = await fetch(url, {cache: 'no-store'});
-    if (!response.ok) throw new Error((await response.json()).error || response.statusText); render(await response.json());
+    const name = await loadReports(selected); const url = name ? '/api/report?name=' + encodeURIComponent(name) : '/api/latest';
+    const [response, costsResponse] = await Promise.all([fetch(url, {cache: 'no-store'}), fetch('/api/costs', {cache: 'no-store'})]);
+    if (!response.ok) throw new Error((await response.json()).error || response.statusText);
+    render(await response.json()); renderCosts(costsResponse.ok ? await costsResponse.json() : null);
   } catch (error) { $('status').textContent = 'ERROR'; $('status').className = 'status failed'; $('run-meta').textContent = String(error); }
 }
 $('refresh').addEventListener('click', () => load($('report-select').value)); $('report-select').addEventListener('change', () => load($('report-select').value)); load(); setInterval(() => load($('report-select').value), 15000);

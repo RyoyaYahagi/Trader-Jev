@@ -33,6 +33,21 @@ set +a
 | `JEV_API_KEY_HEADER` | `Authorization` | APIキーを送るヘッダー |
 | `JEV_API_KEY_SCHEME` | `Bearer` | ヘッダー値のスキーム |
 
+Jevの応答に`usage`（入力・出力トークン数）が含まれる場合、Paperレポートと
+ダッシュボードへ使用量を保存します。プロバイダーの請求単価が応答に含まれない
+場合は、次の任意設定から推定料金を計算できます。単価の単位は1,000トークン
+あたりのUSDです。
+
+| 変数 | 既定値 | 用途 |
+| --- | --- | --- |
+| `JEV_INPUT_PRICE_USD_PER_1K_TOKENS` | 未設定 | 入力1,000トークンあたりの単価 |
+| `JEV_OUTPUT_PRICE_USD_PER_1K_TOKENS` | 未設定 | 出力1,000トークンあたりの単価 |
+| `JEV_REQUEST_PRICE_USD` | 未設定 | 1リクエストあたりの固定料金 |
+| `JEV_PRICE_CURRENCY` | `USD` | 表示通貨のラベル |
+
+単価が未設定でプロバイダーの請求額も応答されない場合、料金は`未計測`として
+扱い、0 USDとは表示しません。
+
 プロバイダーの仕様が `X-API-Key` 方式なら、次のように設定します。
 
 ```bash

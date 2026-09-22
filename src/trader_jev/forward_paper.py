@@ -17,6 +17,7 @@ from collections.abc import Mapping, Sequence
 from datetime import UTC, datetime, time, timedelta
 from decimal import ROUND_DOWN, Decimal, InvalidOperation
 from enum import StrEnum
+from math import ceil
 from pathlib import Path
 from typing import Any
 
@@ -58,6 +59,7 @@ from trader_jev.models import (
     TradingSession,
 )
 from trader_jev.moomoo import MoomooClientConfig, MoomooMarketDataAdapter
+from trader_jev.nasdaq_calendar import NasdaqCalendar, NasdaqSession
 from trader_jev.pipeline import PipelineConfig, PipelineResult, TradingPipeline
 from trader_jev.portfolio import HybridExitPolicy, PortfolioLedger
 from trader_jev.risk import (
@@ -910,6 +912,21 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--initial-capital", type=_decimal, default=Decimal("100000"))
     parser.add_argument("--runtime-seconds", type=_positive_int, default=3600)
+    parser.add_argument(
+        "--nasdaq-calendar",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Skip weekends and NASDAQ regular-session holidays (default: true).",
+    )
+    parser.add_argument(
+        "--until-nasdaq-close",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help=(
+            "Run until the NASDAQ regular-session close, including 13:00 ET early closes "
+            "(default: false)."
+        ),
+    )
     parser.add_argument("--decision-cadence-seconds", type=_nonnegative_float, default=15.0)
     parser.add_argument("--max-positions", type=_positive_int, default=3)
     parser.add_argument("--max-holding-seconds", type=_positive_int, default=300)
@@ -975,11 +992,46 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def resolve_nasdaq_run(
+    now: datetime,
+    *,
+    requested_runtime_seconds: int,
+    use_calendar: bool,
+    until_close: bool,
+) -> tuple[NasdaqSession | None, int | None]:
+    """Resolve a run session and runtime, returning ``None`` for a skip day."""
+
+    if not use_calendar:
+        return None, requested_runtime_seconds
+
+    calendar = NasdaqCalendar()
+    session = calendar.session_for(now)
+    if session is None or now >= session.close_at:
+        return session, None
+    if until_close:
+        remaining = max(1, ceil((session.close_at - now).total_seconds()))
+        return session, remaining
+    return session, requested_runtime_seconds
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
     try:
         decision_modes = _normalize_decision_modes(tuple(args.decision_modes.split(",")))
+        run_now = LiveClock().now()
+        _, runtime_seconds = resolve_nasdaq_run(
+            run_now,
+            requested_runtime_seconds=args.runtime_seconds,
+            use_calendar=args.nasdaq_calendar,
+            until_close=args.until_nasdaq_close,
+        )
+        if runtime_seconds is None:
+            calendar = NasdaqCalendar()
+            local_date = run_now.astimezone(calendar.timezone).date()
+            reason = calendar.closure_reason(local_date) or "regular session already closed"
+            print(f"NASDAQ calendar: skip {local_date.isoformat()} ({reason})")
+            return 0
         env = load_env_file(args.env_file)
         jev_client: JevClient | None = None
         jev_pricing = JevPricingConfig.from_env(env)
@@ -992,7 +1044,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         config = ForwardPaperConfig(
             symbols=tuple(args.symbols.split(",")),
             initial_capital=args.initial_capital,
-            runtime_seconds=args.runtime_seconds,
+            runtime_seconds=runtime_seconds,
             decision_cadence_seconds=args.decision_cadence_seconds,
             max_positions=args.max_positions,
             max_holding_seconds=args.max_holding_seconds,
@@ -1231,6 +1283,7 @@ __all__ = [
     "build_parser",
     "build_us_instruments",
     "main",
+    "resolve_nasdaq_run",
 ]
 
 

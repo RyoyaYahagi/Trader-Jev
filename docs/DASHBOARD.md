@@ -64,6 +64,20 @@ aggregates for the latest usage day, Monday-to-Sunday week, and calendar month.
 The server binds to `127.0.0.1` by default so the report is not exposed to the
 network.
 
+## NASDAQ session schedule
+
+The daily forward-paper service follows the NASDAQ regular U.S. equity session:
+09:30–16:00 in `America/New_York`. The systemd timer uses that timezone, so the
+Japan start time is 22:30 during U.S. daylight saving time and 23:30 during U.S.
+standard time. The application skips weekends and NASDAQ holidays. It also
+stops at the 13:00 ET early close on dates such as the day after Thanksgiving
+and Christmas Eve.
+
+The calendar implementation is in
+`src/trader_jev/nasdaq_calendar.py`. The holiday rules are checked against the
+[Nasdaq U.S. Market Holidays & Trading Hours](https://www.nasdaq.com/market-activity/stock-market-holiday-schedule)
+page when the annual schedule is updated. Extended-hours trading is not used.
+
 ## Parallel capital conditions and decision branches
 
 The forward runner can fork one read-only OpenD quote stream into independent

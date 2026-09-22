@@ -34,6 +34,9 @@ Market dataはHistorical / Replayを優先する。Forward Paperで必要な場�
 
 - prediction horizon: 3〜5分
 - decision cadence: 15秒相当
+- U.S. forward paper: NASDAQ regular session 09:30〜16:00 ET
+- U.S. daylight saving time and standard time are resolved by `America/New_York`
+- NASDAQ holidays are skipped; published 13:00 ET early closes end the session early
 
 ## Direction
 

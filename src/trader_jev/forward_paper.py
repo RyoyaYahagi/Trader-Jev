@@ -33,6 +33,7 @@ from trader_jev.models import (
     InstrumentMetadata,
     Market,
     OrderEvent,
+    OrderIntent,
     PortfolioState,
     QuoteEvent,
     RiskProfile,
@@ -121,6 +122,8 @@ class ForwardPaperSummary(DomainModel):
     errors: tuple[str, ...] = ()
     portfolio: PortfolioState
     fill_events: tuple[Any, ...] = ()
+    order_intents: tuple[OrderIntent, ...] = ()
+    order_events: tuple[OrderEvent, ...] = ()
     run_config: Mapping[str, Any]
 
     _summary_time_aware = field_validator("started_at", "finished_at")(_require_summary_time)
@@ -348,6 +351,8 @@ class ForwardPaperRunner:
             errors=tuple(self._errors[-20:]),
             portfolio=self.ledger.state,
             fill_events=tuple(self.ledger.fills),
+            order_intents=tuple(self.broker.orders),
+            order_events=tuple(self.broker.order_events),
             run_config={
                 "symbols": self.config.symbols,
                 "initial_capital": str(self.config.initial_capital),

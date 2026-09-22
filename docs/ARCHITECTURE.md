@@ -3,7 +3,7 @@
 ## 1. Current architecture
 
 ```text
-Historical / Replay Market Data
+Historical / Replay / Read-only Moomoo Market Data
        ↓
 MarketDataAdapter
        ↓
@@ -29,22 +29,23 @@ DecisionSnapshot
                   Virtual Fill / Portfolio Ledger
 ```
 
-現在は PaperBroker のみ実装対象。
+実行経路はPaperBrokerのみ実装対象。リアルタイム入力として、読み取り専用の`MoomooMarketDataAdapter`を使用できる。
 
 ## 2. Broker API policy
 
-kabuステーションAPI / moomoo API は現在使用しない。
+kabuステーションAPIは現在使用しない。moomoo APIは`MoomooMarketDataAdapter`から市場データを読み取る用途に限って使用する。
 
 実装してよいもの:
 - BrokerAdapter Protocol / ABC
 - PaperBroker
 - FakeBroker / test double
+- MoomooMarketDataAdapter（読み取り専用の市場データ入力）
 
 実装してはいけないもの:
 - KabuStationBroker
 - MoomooBroker
-- broker authentication
-- account state sync
+- moomoo trade API
+- broker account state sync
 - actual order endpoint
 - Shadow接続
 
@@ -54,11 +55,12 @@ kabuステーションAPI / moomoo API は現在使用しない。
 
 ### MarketDataAdapter
 
-Historical file / dataset / replay sourceをcore eventへ正規化する。
+Historical file / dataset / replay source / read-only external quote sourceをcore eventへ正規化する。
 
 Current:
 - ReplayMarketDataAdapter
 - File/HistoricalDataAdapter
+- MoomooMarketDataAdapter（OpenDのmarket snapshotをQuoteEventへ変換）
 
 Future only:
 - realtime external feed adapters
@@ -150,7 +152,7 @@ InstrumentMetadata:
 - ReplayClock
 - TestClock
 
-将来Realtimeを追加する場合のみLiveClockを追加してよい。
+Realtime市場データを使う場合はLiveClockを注入してよい。読み取り専用の市場データ接続は、実注文経路を有効化しない。
 
 strategy logicからsystem wall clockを直接参照しない。
 
@@ -227,7 +229,7 @@ docs/TEST_GATES.mdをarchitecture上の必須品質ゲートとする。
 
 ## 13. Future live extension
 
-将来Liveへ進むことはプロジェクトの正式なロードマップに含む。ただし、Broker API integrationは現在のPaper milestoneとは分離し、Future milestone / deferred Issueで行う。
+将来Liveへ進むことはプロジェクトの正式なロードマップに含む。ただし、Broker trade API integrationは現在のPaper milestoneとは分離し、Future milestone / deferred Issueで行う。今回のMoomooMarketDataAdapterはBrokerAdapterではなく、外部SDK型をQuoteEventへ変換するMarketDataAdapterである。
 
 Paper milestone完了後、その時点で初めて:
 - broker選定

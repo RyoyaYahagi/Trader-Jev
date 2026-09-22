@@ -1,8 +1,9 @@
 """Historical, file, and deterministic synthetic market data adapters.
 
-The current milestone deliberately has no broker SDK or realtime transport.
-Every adapter in this module reads an existing dataset or creates deterministic
-fixtures, then emits only market-neutral core events.
+The current milestone deliberately has no broker trade/account SDK.  The
+read-only realtime Moomoo adapter lives in ``trader_jev.moomoo``; every adapter
+in this module reads an existing dataset or creates deterministic fixtures, then
+emits only market-neutral core events.
 """
 
 from __future__ import annotations

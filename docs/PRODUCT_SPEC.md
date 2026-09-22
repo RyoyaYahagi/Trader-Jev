@@ -17,23 +17,23 @@ Trader-Jev は、短期市場データを Jev で統合し、3〜5分程度の�
 - Risk Profile
 - 資金・単元・同時保有数制約
 
-## 2. Current scope: Paper-only
+## 2. Current scope: Paper execution with read-only realtime quotes
 
-現在のmilestoneでは外部Broker APIを使用しない。
+現在のmilestoneでは実注文を実装しない。市場データ入力として、ユーザーが起動したmoomoo OpenDから読み取り専用のリアルタイム株価を取得できる。
 
 ### Explicitly out of scope for the current milestone
 
 - kabuステーションAPI
-- moomoo API
-- 証券口座ログイン/認証
+- moomoo trade API
+- アプリケーションによる証券口座ログイン情報の保持
 - 実口座残高/position/order取得
 - Shadow Brokerによる証券API接続
 - Live order送信
 - KabuStationBroker / MoomooBroker の具象実装
 
-将来のLive milestoneで KabuStationBroker / MoomooBroker 等を追加する前提で BrokerAdapter interface は保持する。ただし現在は PaperBroker のみ実装する。
+将来のLive milestoneで KabuStationBroker / MoomooBroker 等を追加する前提で BrokerAdapter interface は保持する。ただし現在の注文実行はPaperBrokerのみとする。`MoomooMarketDataAdapter`はBrokerAdapterではなく、QuoteEventを生成する読み取り専用MarketDataAdapterである。
 
-Market data sourceはBroker APIに固定しない。Historical dataset / file / replay adapterを優先し、リアルタイム外部データ源は別途選定されるまで具象実装しない。
+Market data sourceはBroker APIに固定しない。Historical dataset / file / replay adapterを優先し、必要な場合はmoomoo OpenDの読み取り専用quote sourceを差し替え可能な形で使用する。
 
 ## 3. Markets
 
@@ -214,7 +214,7 @@ Historical Replayは以下に使う。
 
 JevのHistorical評価は学習済み知識混入の可能性があるため、参考値として扱う。
 
-外部Broker APIを使わない期間でも、Paper runtimeを完成させ、将来別途選定したリアルタイムdata sourceを差し替えられるようにする。
+外部Brokerの取引APIを使わない期間でも、Paper runtimeを完成させる。`MoomooMarketDataAdapter`から得たQuoteEventは、保存・Feature Engine・Paper実行へ既存の境界を通して渡す。
 
 ## 16. Data rollout
 
@@ -222,12 +222,13 @@ Stage 1:
 - 取得済み/利用可能な1分足・Tick等でReplay基盤
 
 Stage 2:
-- 非Brokerの外部market data sourceを別途選定した場合のみRealtime Adapterを追加
+- 読み取り専用のmoomoo OpenD market snapshotをRealtime Adapterから取得
+- OpenD停止・権限エラー・欠損bid/askはfail closed
 
 Stage 3:
 - L2 dataが入手可能になった場合にL2-aware replay/featureへ拡張
 
-現在のmilestoneでは「kabuステーション/moomooからL2を取得する」は実装しない。
+現在のmilestoneでは「kabuステーションからデータを取得する」ことと、moomooのL2・取引・口座状態APIを実装しない。今回の対象はmoomooの読み取り専用snapshot quoteのみである。
 
 ## 17. Technical stack
 

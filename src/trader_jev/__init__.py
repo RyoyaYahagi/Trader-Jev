@@ -96,6 +96,11 @@ from trader_jev.models import (
     TradeEvent,
     TradeIntent,
 )
+from trader_jev.moomoo import (
+    MoomooApiError,
+    MoomooClientConfig,
+    MoomooMarketDataAdapter,
+)
 from trader_jev.news import (
     InMemoryNewsAdapter,
     NewsFeatureEngine,
@@ -197,6 +202,9 @@ __all__ = [
     "load_prediction_model",
     "MLDecisionModel",
     "MLModelConfig",
+    "MoomooApiError",
+    "MoomooClientConfig",
+    "MoomooMarketDataAdapter",
     "ModelArtifact",
     "InMemoryNewsAdapter",
     "NewsFeatureEngine",

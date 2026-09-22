@@ -2,21 +2,21 @@
 
 Jev を用いて、テクニカル・板・需給・ニュース・機械学習予測を統合し、デイトレ判断を仮想取引で検証する研究・実装プロジェクトです。
 
-## Current milestone: Paper-only
+## Current milestone: Paper execution with read-only realtime quotes
 
-最終的には **Shadow Live → Minimum-size Live → 段階的な実売買** まで進める前提です。ただし、現在の実装milestoneは **Historical Replay + Paper Tradingのみ** とします。
+最終的には **Shadow Live → Minimum-size Live → 段階的な実売買** まで進める前提です。現在の実装milestoneは **Historical Replay + Paper Trading** を中心とし、追加で **moomoo OpenDからの読み取り専用リアルタイム株価取得** を許可します。
 
-**kabuステーションAPI / moomoo API は現段階では使用しません。**
+moomoo APIは市場データ取得に限って使用します。注文・口座状態の取得には使用しません。
 
 禁止事項:
 
 - kabuステーションAPI SDK / endpoint の実装
-- moomoo API SDK / endpoint の実装
-- 証券口座への認証・接続
-- 実注文、Shadow注文、口座残高/position取得
+- moomooの取引API SDK / endpoint の実装
+- moomooの口座残高・position・order取得
+- 実注文、Shadow注文
 - Live Broker Adapter の具象実装
 
-将来のLive移行はプロジェクトの正式なロードマップに残します。ただし現在のmilestoneでは外部Brokerへ接続せず、Live/Shadow用Issueは deferred とします。BrokerAdapter interface は将来拡張を前提に維持します。
+`MoomooMarketDataAdapter` は `MarketDataAdapter` として読み取り専用のQuoteEventを返します。OpenDのログイン情報はアプリケーションで扱いません。将来のLive移行とBrokerAdapter interfaceは、今回の市場データ接続とは分離して維持します。
 
 ## Project goals
 
@@ -35,6 +35,7 @@ Jev を用いて、テクニカル・板・需給・ニュース・機械学習�
 - Markets: Japan / US を研究対象とする
 - Direction model: LONG / SHORT / HOLD
 - Execution: PaperBroker only
+- Realtime market data: optional read-only `MoomooMarketDataAdapter`
 - Live trading: future milestone（現在は未実装）
 - Main validation: Historical Replay と Paper Trading
 
@@ -50,13 +51,14 @@ Jev を用いて、テクニカル・板・需給・ニュース・機械学習�
 6. [JEV_HTTP.md](docs/JEV_HTTP.md)（実Jev HTTP接続を使う場合）
 7. [ML.md](docs/ML.md)（ML学習・LightGBM・Paper利用）
 8. [JQUANTS.md](docs/JQUANTS.md)（J-Quants過去データ取得）
+9. [MOOMOO.md](docs/MOOMOO.md)（OpenDからの読み取り専用リアルタイム株価取得）
 
 GitHub Issue #1 をロードマップの起点とします。
 
 ## Core principle
 
 ```text
-Market Data / Replay Data
+Market Data / Replay Data / Read-only Moomoo Quote
     ↓
 Feature Engine
     ↓

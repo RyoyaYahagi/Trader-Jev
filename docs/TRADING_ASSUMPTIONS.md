@@ -4,11 +4,12 @@
 
 ## Current milestone
 
-**Paper-only。実取引APIは使用しない。**
+**Paper execution only。実注文APIは使用しない。読み取り専用のmoomoo quote APIによるリアルタイム株価取得は使用できる。**
 
 - kabuステーションAPI: 使用しない
-- moomoo API: 使用しない
-- 証券口座接続: しない
+- moomoo trade API: 使用しない
+- moomoo account API: 使用しない
+- OpenDのログイン情報: Trader-Jevでは保持しない
 - 実注文: しない
 - Shadow broker connection: しない
 - PaperBroker: 使用する
@@ -20,7 +21,7 @@
 
 共通Coreで扱う。
 
-Market dataはHistorical / Replayを優先し、Broker APIから取得しない。
+Market dataはHistorical / Replayを優先する。Forward Paperで必要な場合は、moomoo OpenDから読み取り専用のquote snapshotを取得する。
 
 ## Initial universe
 
@@ -127,7 +128,7 @@ Paper:
 6. **Future milestone:** Minimum-size Live
 7. **Future milestone:** explicit expansion decision
 
-Live / Shadow / broker API integrationは将来実施する前提だが、現在のmilestoneでは未実装。
+Live / Shadow / broker trade API integrationは将来実施する前提だが、現在のmilestoneでは未実装。現在実装するmoomoo接続は市場データの読み取り専用である。
 
 ## Test gates
 

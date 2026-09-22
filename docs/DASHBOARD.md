@@ -34,7 +34,9 @@ positions/orders, equity and cost metrics, structured-log filtering, health,
 forward-Paper progress, and reproducible experiment metadata. Sensitive
 credential-like log fields are redacted before they enter the read model.
 
-The current milestone remains Paper-only. Shadow/Live modes are represented only
-as future display values; no live connectivity or control operation is exposed.
+The current milestone remains Paper-execution-only. Read-only realtime quote
+input may come through the separate Moomoo market-data adapter, but the
+dashboard itself exposes no live connectivity or control operation. Shadow/Live
+modes are represented only as future display values.
 Gate 5 remains pending until the separate Paper validation issue (#14) is
 completed.

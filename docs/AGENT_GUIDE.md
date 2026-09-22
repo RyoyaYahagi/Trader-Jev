@@ -13,22 +13,26 @@ Before implementing any issue, read:
 
 Do not implement an issue in isolation.
 
-## Current scope is Paper-only; future Live is planned
+## Current scope is Paper execution; read-only realtime quotes are allowed
 
 The project is designed to reach Live trading in a later milestone. This rule applies only to the **current Paper milestone** and is mandatory until the Future Live milestone is explicitly started.
 
 Do NOT:
 
 - implement or call kabuステーションAPI
-- implement or call moomoo API
+- implement or call moomoo trade API
 - add KabuStationBroker / MoomooBroker
-- authenticate to a brokerage account
 - read real brokerage positions/orders/balances
 - submit real orders
 - implement Shadow broker connectivity
 - add live-order arming logic as executable functionality
 
-You should preserve generic interfaces that make future Live adapters possible, because Shadow/Live is part of the long-term roadmap. However, only PaperBroker/FakeBroker are implemented in the current milestone.
+`MoomooMarketDataAdapter` may call the read-only quote API through a user-started
+OpenD gateway and must normalize the result into core market events. It must not
+access trade or account contexts. You should preserve generic interfaces that
+make future Live adapters possible, because Shadow/Live is part of the
+long-term roadmap. Only PaperBroker/FakeBroker are implemented for order
+execution in the current milestone.
 
 If an issue or old comment conflicts with this rule, this document and the latest issue text take precedence.
 
@@ -99,4 +103,4 @@ Implementation must:
 - preserve replay determinism
 - emit audit metadata
 - avoid future leakage
-- never require a brokerage API in current milestone
+- never require a brokerage trade or account API in current milestone

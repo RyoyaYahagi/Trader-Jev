@@ -39,21 +39,33 @@ class FakeResponse:
 
 def test_from_env_requires_api_key() -> None:
     with pytest.raises(ValueError, match=r"JEV_API_KEY \(or TYPESAFE_API_KEY\) is required"):
-        JevHttpClient.from_env({"JEV_BASE_URL": "https://jev.example"})
+        JevHttpClient.from_env(
+            {"JEV_GATEWAY_URL": "", "JEV_BASE_URL": "https://jev.example"}
+        )
 
 
-def test_from_env_uses_typesafe_defaults_and_alias_key() -> None:
-    client = JevHttpClient.from_env({"TYPESAFE_API_KEY": "secret"})
+def test_from_env_defaults_to_local_gateway_without_upstream_key() -> None:
+    client = JevHttpClient.from_env({})
 
-    assert client.config.base_url == "https://api.typesafe.ai"
+    assert client.config.gateway_url == "http://127.0.0.1:4789/v1/systemone"
+    assert client.config.api_key is None
     assert client.config.endpoint_path == "/v1/systemone"
     assert client.config.model == "jev-latest"
+
+
+def test_direct_from_env_accepts_typesafe_alias_when_gateway_is_disabled() -> None:
+    client = JevHttpClient.from_env({"JEV_GATEWAY_URL": "", "TYPESAFE_API_KEY": "secret"})
+
+    assert client.config.gateway_url is None
+    assert client.config.api_key is not None
+    assert client.config.api_key.get_secret_value() == "secret"
 
 
 def test_from_env_parses_optional_settings_without_exposing_key() -> None:
     client = JevHttpClient.from_env(
         {
             "JEV_API_KEY": "secret-value",
+            "JEV_GATEWAY_URL": "",
             "JEV_BASE_URL": "https://jev.example/",
             "JEV_ENDPOINT_PATH": "/decide",
             "JEV_TIMEOUT_SECONDS": "2.5",
@@ -67,7 +79,25 @@ def test_from_env_parses_optional_settings_without_exposing_key() -> None:
     assert client.config.endpoint_path == "/decide"
     assert client.config.timeout_seconds == 2.5
     assert client.config.max_response_bytes == 1234
+    assert client.config.gateway_url is None
     assert "secret-value" not in repr(client.config)
+
+
+def test_gateway_uses_local_token_without_forwarding_upstream_key() -> None:
+    client = JevHttpClient.from_env(
+        {
+            "JEV_API_KEY": "upstream-secret",
+            "JEV_GATEWAY_URL": "http://127.0.0.1:4789/v1/systemone",
+            "JEV_GATEWAY_TOKEN": "local-token",
+        }
+    )
+
+    headers = client._headers()  # pyright: ignore[reportPrivateUsage]
+
+    assert client._url() == "http://127.0.0.1:4789/v1/systemone"  # pyright: ignore[reportPrivateUsage]
+    assert client.config.api_key is None
+    assert headers["Authorization"] == "Bearer local-token"
+    assert "upstream-secret" not in repr(headers)
 
 
 def test_config_rejects_credentials_in_base_url() -> None:
@@ -128,6 +158,7 @@ async def test_client_posts_typed_request_with_secret_in_header_only(
     client = JevHttpClient.from_env(
         {
             "JEV_API_KEY": "secret-value",
+            "JEV_GATEWAY_URL": "",
             "JEV_BASE_URL": "https://jev.example",
         }
     )

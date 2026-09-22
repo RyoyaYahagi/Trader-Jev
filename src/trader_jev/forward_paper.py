@@ -93,6 +93,7 @@ DEFAULT_US_SYMBOLS: tuple[str, ...] = (
 DEFAULT_USD_JPY_RATE = Decimal("157.49")
 DEFAULT_USD_JPY_AS_OF = "2026-09-18T17:00:00+09:00"
 DEFAULT_USD_JPY_SOURCE = "Bank of Japan Foreign Exchange Rates (17:00 JST)"
+DEFAULT_UNCONSTRAINED_JPY_REFERENCE = Decimal("500000")
 
 
 class ForwardDecisionMode(StrEnum):
@@ -159,8 +160,12 @@ DEFAULT_CAPITAL_SCENARIOS: tuple[CapitalScenario, ...] = (
     CapitalScenario(
         scenario_id="unconstrained",
         label="制約なし",
-        initial_capital=Decimal("1000000"),
+        initial_capital=_jpy_to_usd(
+            DEFAULT_UNCONSTRAINED_JPY_REFERENCE,
+            DEFAULT_USD_JPY_RATE,
+        ),
         capital_constraint=None,
+        jpy_capital=DEFAULT_UNCONSTRAINED_JPY_REFERENCE,
         usd_jpy_rate=DEFAULT_USD_JPY_RATE,
         fx_as_of=DEFAULT_USD_JPY_AS_OF,
         fx_source=DEFAULT_USD_JPY_SOURCE,
@@ -402,8 +407,16 @@ class ForwardPaperRunner:
         )
         self.feature_engine = InMemoryFeatureEngine()
         self._jev_adapter: JevDecisionAdapter | None = None
+        self._jev_transport: str | None = None
         if self.config.decision_mode is ForwardDecisionMode.JEV:
             client = jev_client or JevHttpClient.from_env()
+            self._jev_transport = (
+                "gateway"
+                if isinstance(client, JevHttpClient) and client.config.gateway_url is not None
+                else "direct"
+                if isinstance(client, JevHttpClient)
+                else "custom"
+            )
             self._jev_adapter = JevDecisionAdapter(
                 client,
                 config=JevAdapterConfig(
@@ -554,6 +567,7 @@ class ForwardPaperRunner:
                 "fx_source": self.config.fx_source,
                 "decision_mode": self.config.decision_mode.value,
                 "decision_label": self.config.decision_mode.label,
+                "jev_transport": self._jev_transport,
                 "jev_model": (
                     self.config.jev_model
                     if self.config.decision_mode is ForwardDecisionMode.JEV
@@ -775,21 +789,26 @@ class ParallelForwardPaperRunner:
 def build_capital_scenarios(
     values: Sequence[str] | None = None,
     *,
-    unconstrained_initial_capital: Decimal = Decimal("1000000"),
+    unconstrained_initial_capital: Decimal | None = None,
     usd_jpy_rate: Decimal = DEFAULT_USD_JPY_RATE,
     fx_as_of: str = DEFAULT_USD_JPY_AS_OF,
     fx_source: str = DEFAULT_USD_JPY_SOURCE,
 ) -> tuple[CapitalScenario, ...]:
     """Build JPY-denominated capital scenarios converted to USD for PaperBroker."""
 
-    if unconstrained_initial_capital <= 0:
-        raise ValueError("unconstrained_initial_capital must be positive")
     if not usd_jpy_rate.is_finite() or usd_jpy_rate <= 0:
         raise ValueError("usd_jpy_rate must be positive and finite")
     if not fx_as_of.strip() or not fx_source.strip():
         raise ValueError("fx_as_of and fx_source must not be blank")
     if values is None:
         values = ("100000", "250000", "500000", "unconstrained")
+    unconstrained_cash = (
+        _jpy_to_usd(DEFAULT_UNCONSTRAINED_JPY_REFERENCE, usd_jpy_rate)
+        if unconstrained_initial_capital is None
+        else unconstrained_initial_capital
+    )
+    if not unconstrained_cash.is_finite() or unconstrained_cash <= 0:
+        raise ValueError("unconstrained_initial_capital must be positive")
 
     scenarios: list[CapitalScenario] = []
     seen: set[str] = set()
@@ -812,7 +831,12 @@ def build_capital_scenarios(
             scenario = CapitalScenario(
                 scenario_id="unconstrained",
                 label="制約なし",
-                initial_capital=unconstrained_initial_capital,
+                initial_capital=unconstrained_cash,
+                jpy_capital=(
+                    DEFAULT_UNCONSTRAINED_JPY_REFERENCE
+                    if unconstrained_initial_capital is None
+                    else None
+                ),
                 usd_jpy_rate=usd_jpy_rate,
                 fx_as_of=fx_as_of,
                 fx_source=fx_source,
@@ -936,9 +960,12 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--unconstrained-initial-capital",
-        type=_decimal,
-        default=Decimal("1000000"),
-        help="Reference starting cash for the no-capital-limit scenario (default: 1000000 USD).",
+        type=_positive_decimal,
+        default=None,
+        help=(
+            "Reference starting cash in USD for the no-capital-limit scenario; "
+            "by default it equals the 500000 JPY scenario at --usd-jpy."
+        ),
     )
     parser.add_argument(
         "--report-dir",

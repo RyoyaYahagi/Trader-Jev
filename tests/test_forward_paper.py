@@ -199,7 +199,8 @@ def test_capital_scenario_parser_supports_requested_labels() -> None:
     ]
     assert all(scenario.usd_jpy_rate == Decimal("157.49") for scenario in scenarios)
     assert scenarios[-1].capital_constraint is None
-    assert scenarios[-1].initial_capital == Decimal("1000000")
+    assert scenarios[-1].initial_capital == Decimal("3174.80")
+    assert scenarios[-1].jpy_capital == Decimal("500000")
 
 
 @pytest.mark.asyncio
@@ -234,6 +235,7 @@ async def test_parallel_forward_paper_runs_rule_and_jev_branches_independently()
         "10万制約 / ルール判定",
         "10万制約 / Jev判定",
     ]
+    assert summaries[1].run_config["jev_transport"] == "custom"
     assert summaries[0].portfolio.initial_capital == Decimal("1000.00")
     assert summaries[1].portfolio.initial_capital == Decimal("1000.00")
     assert summaries[0].jev_usage.request_count == 0

@@ -54,7 +54,7 @@ def test_env_file_does_not_override_process_environment(
 ) -> None:
     env_file = tmp_path / ".env"
     env_file.write_text(
-        "JEV_API_KEY=file-key\nTYPESAFE_API_KEY=typesafe-file-key\n"
+        "JEV_GATEWAY_URL=\nJEV_API_KEY=file-key\nTYPESAFE_API_KEY=typesafe-file-key\n"
         "JEV_BASE_URL=https://file.example\nJQUANTS_API_KEY=jquants-file-key\n",
         encoding="utf-8",
     )
@@ -66,6 +66,26 @@ def test_env_file_does_not_override_process_environment(
     assert values["TYPESAFE_API_KEY"] == "typesafe-file-key"
     assert values["JEV_BASE_URL"] == "https://file.example"
     assert values["JQUANTS_API_KEY"] == "jquants-file-key"
+
+
+def test_env_file_drops_upstream_keys_when_gateway_is_enabled(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    env_file = tmp_path / ".env"
+    env_file.write_text(
+        "JEV_GATEWAY_URL=http://127.0.0.1:4789/v1/systemone\n"
+        "JEV_API_KEY=file-key\nTYPESAFE_API_KEY=typesafe-file-key\n",
+        encoding="utf-8",
+    )
+    monkeypatch.delenv("JEV_GATEWAY_URL", raising=False)
+    monkeypatch.delenv("JEV_API_KEY", raising=False)
+    monkeypatch.delenv("TYPESAFE_API_KEY", raising=False)
+
+    values = load_env_file(env_file)
+
+    assert values["JEV_GATEWAY_URL"] == "http://127.0.0.1:4789/v1/systemone"
+    assert "JEV_API_KEY" not in values
+    assert "TYPESAFE_API_KEY" not in values
 
 
 def test_parser_requires_one_data_source() -> None:

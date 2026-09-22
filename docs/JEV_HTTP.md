@@ -1,7 +1,9 @@
 # Jev HTTP接続設定
 
 現在のコアは `JevClient` Protocolだけを要求し、HTTP transportには依存しません。
-TypeSafe AI の System One APIへ接続するときは、追加した `JevHttpClient` を使います。
+共有ワークステーションでは、`JevHttpClient` はローカル Jev Gatewayを既定の接続先に
+します。Gatewayが上流TypeSafeのAPIキーを管理し、アプリケーションはローカルHTTPへ
+リクエストするだけです。
 
 ## 設定
 
@@ -13,9 +15,22 @@ source .env
 set +a
 ```
 
-必須項目はAPIキーです。TypeSafeのAPIホストとエンドポイントは既定値に含まれています。
+既定の接続先は次のGatewayです。
 
-- `JEV_API_KEY`: APIキー
+```text
+http://127.0.0.1:4789/v1/systemone
+```
+
+Gatewayの上流キーはアプリケーションではなく、Gatewayサービスが `pass` から読み込みます。
+Gatewayにローカル認証を設定している場合だけ、次を設定します。
+
+- `JEV_GATEWAY_URL`: Gatewayの完全なPOST先。未設定時は上記の既定値、空文字なら直接接続へ切替
+- `JEV_GATEWAY_TOKEN`: Gateway専用の任意のローカルBearerトークン。上流APIキーとは別物
+
+直接TypeSafeへ接続する場合だけ、次の上流認証を設定します。Gateway使用時は読み込まれて
+いても送信しません。
+
+- `JEV_API_KEY`: TypeSafe APIキー
 - `TYPESAFE_API_KEY`: TypeSafe公式ドキュメントの環境変数名。`JEV_API_KEY` の代わりに使用可能
 
 `JEV_BASE_URL` は上書き用の任意項目です。TypeSafeを使う場合の既定値は
@@ -25,7 +40,9 @@ set +a
 
 | 変数 | 既定値 | 用途 |
 | --- | --- | --- |
-| `JEV_BASE_URL` | `https://api.typesafe.ai` | APIホスト |
+| `JEV_GATEWAY_URL` | `http://127.0.0.1:4789/v1/systemone` | Gatewayの完全なPOST先 |
+| `JEV_GATEWAY_TOKEN` | 未設定 | Gateway専用の任意Bearerトークン |
+| `JEV_BASE_URL` | `https://api.typesafe.ai` | 直接接続時のAPIホスト |
 | `JEV_ENDPOINT_PATH` | `/v1/systemone` | POST先のパス |
 | `JEV_MODEL` | `jev-latest` | リクエストに含めるモデル名 |
 | `JEV_TIMEOUT_SECONDS` | `5` | HTTPタイムアウト |
@@ -69,12 +86,16 @@ adapter = JevDecisionAdapter(client)
 ```
 
 クライアントは `JevRequest` の状態を TypeSafe の `state` にまとめ、`model` と typed
-questions（Choice、Score、Noul）を付けて `/v1/systemone` へPOSTします。TypeSafeの
+questions（Choice、Score、Noul）を付けてGateway（または明示的に選んだ直接接続先）の
+`/v1/systemone` へPOSTします。TypeSafeの
 `answers` は既存の `JevDecision`（action、direction、regime、setup quality、確率、confidence）へ変換されます。
 応答が不正、タイムアウト、HTTPエラーの場合は、既存のfail-closed動作によりHOLDになります。
 
-TypeSafeのAPIキーは `Authorization: Bearer <API_KEY>` ヘッダーで送信します。
-APIキーはURL・リクエスト本文・監査レスポンス・エラーメッセージに含めません。
+Gateway使用時は、上流TypeSafeのAPIキーをアプリケーションから送信しません。Gatewayの
+ローカル認証を設定した場合だけ、`JEV_GATEWAY_TOKEN` を
+`Authorization: Bearer <GATEWAY_TOKEN>` として送信します。直接接続時だけ、TypeSafeの
+APIキーを `Authorization: Bearer <API_KEY>` として送信します。いずれの認証情報もURL・
+リクエスト本文・監査レスポンス・エラーメッセージへ含めません。
 
 ## Paper実行CLI
 

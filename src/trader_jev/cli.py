@@ -454,27 +454,33 @@ def _book_market_state(event: OrderBookEvent) -> MarketState:
 
 
 def load_env_file(path: Path) -> dict[str, str]:
-    """Load JEV/J-Quants KEY=VALUE entries without exposing or overriding secrets."""
+    """Load allowed KEY=VALUE entries and drop unused upstream keys for Gateway use."""
 
     values = dict(os.environ)
-    if not path.exists():
-        return values
-    if not path.is_file():
+    if path.exists() and not path.is_file():
         raise ValueError(f"env file is not a file: {path}")
-    for line_number, raw_line in enumerate(path.read_text(encoding="utf-8").splitlines(), start=1):
-        line = raw_line.strip()
-        if not line or line.startswith("#"):
-            continue
-        if line.startswith("export "):
-            line = line[7:].lstrip()
-        if "=" not in line:
-            raise ValueError(f"env file line {line_number} must use KEY=VALUE")
-        name, raw_value = line.split("=", 1)
-        name = name.strip()
-        if not name.startswith(("JEV_", "JQUANTS_")) and name != "TYPESAFE_API_KEY":
-            continue
-        value = _parse_env_value(raw_value.strip(), line_number)
-        values.setdefault(name, value)
+    if path.exists():
+        for line_number, raw_line in enumerate(
+            path.read_text(encoding="utf-8").splitlines(), start=1
+        ):
+            line = raw_line.strip()
+            if not line or line.startswith("#"):
+                continue
+            if line.startswith("export "):
+                line = line[7:].lstrip()
+            if "=" not in line:
+                raise ValueError(f"env file line {line_number} must use KEY=VALUE")
+            name, raw_value = line.split("=", 1)
+            name = name.strip()
+            if not name.startswith(("JEV_", "JQUANTS_")) and name != "TYPESAFE_API_KEY":
+                continue
+            value = _parse_env_value(raw_value.strip(), line_number)
+            values.setdefault(name, value)
+
+    gateway_setting = values.get("JEV_GATEWAY_URL")
+    if gateway_setting is None or gateway_setting.strip():
+        values.pop("JEV_API_KEY", None)
+        values.pop("TYPESAFE_API_KEY", None)
     return values
 
 

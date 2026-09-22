@@ -18,10 +18,12 @@ from urllib.error import HTTPError, URLError
 from urllib.parse import urlsplit
 from urllib.request import Request, urlopen
 
-from pydantic import Field, SecretStr, field_validator
+from pydantic import Field, SecretStr, field_validator, model_validator
 
 from trader_jev.decision import JevDecision, JevRequest
 from trader_jev.models import DomainModel
+
+DEFAULT_JEV_GATEWAY_URL = "http://127.0.0.1:4789/v1/systemone"
 
 
 class JevHttpError(RuntimeError):
@@ -36,13 +38,15 @@ class JevHttpClientConfig(DomainModel):
     """
 
     base_url: str = Field(default="https://api.typesafe.ai", min_length=1)
-    api_key: SecretStr = Field(repr=False)
+    api_key: SecretStr | None = Field(default=None, repr=False)
     endpoint_path: str = Field(default="/v1/systemone", min_length=1)
     model: str = Field(default="jev-latest", min_length=1)
     timeout_seconds: float = Field(default=5.0, gt=0)
     max_response_bytes: int = Field(default=65_536, gt=0)
     api_key_header: str = Field(default="Authorization", min_length=1)
     api_key_scheme: str = Field(default="Bearer", max_length=64)
+    gateway_url: str | None = Field(default=None, min_length=1)
+    gateway_token: SecretStr | None = Field(default=None, repr=False)
 
     @field_validator("base_url")
     @classmethod
@@ -79,6 +83,26 @@ class JevHttpClientConfig(DomainModel):
             raise ValueError("api_key_scheme must not contain line breaks")
         return value
 
+    @field_validator("gateway_url")
+    @classmethod
+    def validate_gateway_url(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        parsed = urlsplit(value)
+        if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+            raise ValueError("gateway_url must be an absolute http(s) URL")
+        if parsed.username is not None or parsed.password is not None:
+            raise ValueError("gateway_url must not contain user credentials")
+        if parsed.query or parsed.fragment:
+            raise ValueError("gateway_url must not contain a query or fragment")
+        return value.rstrip("/")
+
+    @model_validator(mode="after")
+    def validate_authentication(self) -> JevHttpClientConfig:
+        if self.gateway_url is None and self.api_key is None:
+            raise ValueError("api_key is required when gateway_url is not configured")
+        return self
+
 
 class JevHttpClient:
     """Async TypeSafe System One client implementing the transport-neutral Jev contract.
@@ -94,16 +118,34 @@ class JevHttpClient:
 
     @classmethod
     def from_env(cls, env: Mapping[str, str] | None = None) -> JevHttpClient:
-        """Build a client from ``JEV_*`` environment variables.
+        """Build a gateway-first client from ``JEV_*`` environment variables.
 
-        The required credential is ``JEV_API_KEY`` (or the provider's
-        documented ``TYPESAFE_API_KEY``).  ``JEV_BASE_URL`` is optional and
-        defaults to TypeSafe's documented API host.  A ``.env`` file is
-        intentionally not parsed here; callers can load it using their process
-        manager or shell before constructing the client.
+        Unless ``JEV_GATEWAY_URL`` is explicitly set to an empty string, the
+        local Gateway is the default transport.  Direct TypeSafe access remains
+        available by setting ``JEV_GATEWAY_URL=`` and providing
+        ``JEV_API_KEY`` or ``TYPESAFE_API_KEY``.
         """
 
         values: Mapping[str, str] = os.environ if env is None else env
+        gateway_setting = values.get("JEV_GATEWAY_URL")
+        gateway_url = (
+            DEFAULT_JEV_GATEWAY_URL
+            if gateway_setting is None
+            else gateway_setting.strip() or None
+        )
+        if gateway_url is not None:
+            gateway_token = values.get("JEV_GATEWAY_TOKEN", "").strip()
+            return cls(
+                JevHttpClientConfig(
+                    base_url=values.get("JEV_BASE_URL", "https://api.typesafe.ai").strip(),
+                    endpoint_path=values.get("JEV_ENDPOINT_PATH", "/v1/systemone"),
+                    model=values.get("JEV_MODEL", "jev-latest"),
+                    timeout_seconds=_float_env(values, "JEV_TIMEOUT_SECONDS", 5.0),
+                    max_response_bytes=_int_env(values, "JEV_MAX_RESPONSE_BYTES", 65_536),
+                    gateway_url=gateway_url,
+                    gateway_token=SecretStr(gateway_token) if gateway_token else None,
+                )
+            )
         api_key = values.get("JEV_API_KEY", "").strip()
         if not api_key:
             api_key = values.get("TYPESAFE_API_KEY", "").strip()
@@ -187,9 +229,24 @@ class JevHttpClient:
         return json.dumps(decoded, ensure_ascii=False)
 
     def _url(self) -> str:
+        if self.config.gateway_url is not None:
+            return self.config.gateway_url
         return f"{self.config.base_url}/{self.config.endpoint_path.lstrip('/')}"
 
     def _headers(self) -> dict[str, str]:
+        if self.config.gateway_url is not None:
+            headers = {
+                "Accept": "application/json",
+                "Content-Type": "application/json",
+                "User-Agent": "trader-jev/0.1",
+            }
+            if self.config.gateway_token is not None:
+                headers["Authorization"] = (
+                    f"Bearer {self.config.gateway_token.get_secret_value()}"
+                )
+            return headers
+        if self.config.api_key is None:
+            raise JevHttpError("Jev HTTP client has no direct API key")
         api_key = self.config.api_key.get_secret_value()
         scheme = self.config.api_key_scheme.strip()
         credential = f"{scheme} {api_key}".strip() if scheme else api_key
@@ -393,4 +450,9 @@ def _int_env(values: Mapping[str, str], name: str, default: int) -> int:
         raise ValueError(f"{name} must be an integer") from exc
 
 
-__all__ = ["JevHttpClient", "JevHttpClientConfig", "JevHttpError"]
+__all__ = [
+    "DEFAULT_JEV_GATEWAY_URL",
+    "JevHttpClient",
+    "JevHttpClientConfig",
+    "JevHttpError",
+]

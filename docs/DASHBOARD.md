@@ -73,13 +73,14 @@ converted to USD before they reach the US-equity Paper risk limits:
 - `10万制約`: 100,000 JPY converted to USD
 - `25万制約`: 250,000 JPY converted to USD
 - `50万制約`: 500,000 JPY converted to USD
-- `制約なし`: no configured order or position notional limit, with 1,000,000
-  USD reference starting cash so the Paper ledger can calculate equity
+- `制約なし`: no configured order or position notional limit, with the same
+  500,000 JPY-equivalent starting cash as the largest constrained case
 
 The conversion rate, timestamp, and source are written into every report. The
 default configuration uses 157.49 JPY per USD (BOJ 17:00 JST rate recorded on
 2026-09-18); pass `--usd-jpy`, `--fx-as-of`, and `--fx-source` to use another
-explicit rate.
+explicit rate. The no-limit case therefore defaults to approximately 3,174.80
+USD at the default rate; it is not an unlimited-cash case.
 
 Run the four capital conditions with both decision branches using:
 

@@ -38,7 +38,7 @@ Gatewayにローカル認証を設定している場合だけ、次を設定し�
 
 任意項目の既定値は次のとおりです。
 
-| 変数 | 既定値 | 用途 |
+| 変数 | 推奨値 | 用途 |
 | --- | --- | --- |
 | `JEV_GATEWAY_URL` | `http://127.0.0.1:4789/v1/systemone` | Gatewayの完全なPOST先 |
 | `JEV_GATEWAY_TOKEN` | 未設定 | Gateway専用の任意Bearerトークン |
@@ -55,10 +55,10 @@ Jevの応答に`usage`（入力・出力トークン数）が含まれる場合�
 場合は、次の任意設定から推定料金を計算できます。単価の単位は1,000トークン
 あたりのUSDです。
 
-| 変数 | 既定値 | 用途 |
+| 変数 | 推奨値 | 用途 |
 | --- | --- | --- |
-| `JEV_INPUT_PRICE_USD_PER_1K_TOKENS` | 未設定 | 入力1,000トークンあたりの単価 |
-| `JEV_OUTPUT_PRICE_USD_PER_1K_TOKENS` | 未設定 | 出力1,000トークンあたりの単価 |
+| `JEV_INPUT_PRICE_USD_PER_1K_TOKENS` | `0.000042` | 入力1,000トークンあたりの単価。TypeSafe公開値 `$0.042 / 1,000,000 tokens` に対応 |
+| `JEV_OUTPUT_PRICE_USD_PER_1K_TOKENS` | `0` | 出力1,000トークンあたりの単価。TypeSafe公開値は無料 |
 | `JEV_REQUEST_PRICE_USD` | 未設定 | 1リクエストあたりの固定料金 |
 | `JEV_PRICE_CURRENCY` | `USD` | 表示通貨のラベル |
 

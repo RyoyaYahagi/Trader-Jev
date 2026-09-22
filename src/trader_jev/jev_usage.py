@@ -127,12 +127,19 @@ def usage_record_from_audit(
 
     current_pricing = pricing or JevPricingConfig()
     usage = _usage_mapping(audit.response)
-    input_tokens = _usage_int(usage, ("input_tokens", "prompt_tokens", "input_token_count"))
-    output_tokens = _usage_int(
+    input_token_count = _usage_int_or_none(
+        usage, ("input_tokens", "prompt_tokens", "input_token_count")
+    )
+    output_token_count = _usage_int_or_none(
         usage,
         ("output_tokens", "completion_tokens", "output_token_count"),
     )
-    total_tokens = _usage_int(usage, ("total_tokens", "tokens")) or input_tokens + output_tokens
+    input_tokens = input_token_count or 0
+    output_tokens = output_token_count or 0
+    total_token_count = _usage_int_or_none(usage, ("total_tokens", "tokens"))
+    total_tokens = (
+        total_token_count if total_token_count is not None else input_tokens + output_tokens
+    )
 
     provider_cost = _usage_decimal(
         usage,
@@ -141,7 +148,9 @@ def usage_record_from_audit(
     if provider_cost is not None:
         estimated_cost = provider_cost
         cost_status = "PROVIDER_REPORTED"
-    elif current_pricing.configured:
+    elif current_pricing.configured and _can_estimate_cost(
+        current_pricing, input_token_count, output_token_count
+    ):
         estimated_cost = _estimate_cost(
             input_tokens,
             output_tokens,
@@ -230,7 +239,7 @@ def _usage_mapping(response: Mapping[str, Any] | None) -> Mapping[str, Any]:
     return cast(Mapping[str, Any], value) if isinstance(value, Mapping) else {}
 
 
-def _usage_int(usage: Mapping[str, Any], names: Sequence[str]) -> int:
+def _usage_int_or_none(usage: Mapping[str, Any], names: Sequence[str]) -> int | None:
     for name in names:
         value = usage.get(name)
         if value is None or isinstance(value, bool):
@@ -241,7 +250,28 @@ def _usage_int(usage: Mapping[str, Any], names: Sequence[str]) -> int:
             continue
         if parsed >= 0:
             return parsed
-    return 0
+    return None
+
+
+def _can_estimate_cost(
+    pricing: JevPricingConfig,
+    input_tokens: int | None,
+    output_tokens: int | None,
+) -> bool:
+    """Require usage for every non-free token-priced component."""
+
+    return not (
+        (
+            pricing.input_usd_per_1k_tokens is not None
+            and pricing.input_usd_per_1k_tokens > 0
+            and input_tokens is None
+        )
+        or (
+            pricing.output_usd_per_1k_tokens is not None
+            and pricing.output_usd_per_1k_tokens > 0
+            and output_tokens is None
+        )
+    )
 
 
 def _usage_decimal(usage: Mapping[str, Any], names: Sequence[str]) -> Decimal | None:

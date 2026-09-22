@@ -113,6 +113,11 @@ JEV_REQUEST_PRICE_USD
 JEV_PRICE_CURRENCY=USD
 ```
 
+The current public Jev rate is `0.000042 USD` per 1,000 input tokens, and
+output tokens are free. The repository `.env.example` and the local paper
+runner environment use these values for estimated dashboard costs. Update the
+values if TypeSafe changes its public rate.
+
 The forward runner uses the rule baseline by default. Include
 `--decision-modes rule,jev` to create the parallel Jev branch. The dashboard
 does not call Jev and does not add any external charge. If provider usage or

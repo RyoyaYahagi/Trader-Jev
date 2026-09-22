@@ -61,6 +61,28 @@ def test_jev_usage_does_not_claim_zero_cost_when_rates_are_missing() -> None:
     assert summary.cost_status == "UNPRICED"
 
 
+def test_jev_usage_does_not_claim_zero_cost_without_input_usage() -> None:
+    audit = JevAuditRecord(
+        request_id=uuid4(),
+        snapshot_id=uuid4(),
+        sent_at=NOW,
+        received_at=NOW,
+        success=True,
+        response={"action": "HOLD"},
+    )
+
+    record = usage_record_from_audit(
+        audit,
+        JevPricingConfig(
+            input_usd_per_1k_tokens=Decimal("0.000042"),
+            output_usd_per_1k_tokens=Decimal("0"),
+        ),
+    )
+
+    assert record.estimated_cost is None
+    assert record.cost_status == "UNPRICED"
+
+
 @pytest.mark.asyncio
 async def test_jev_adapter_keeps_provider_usage_in_the_audit_record() -> None:
     class Client:

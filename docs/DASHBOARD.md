@@ -64,27 +64,38 @@ aggregates for the latest usage day, Monday-to-Sunday week, and calendar month.
 The server binds to `127.0.0.1` by default so the report is not exposed to the
 network.
 
-## Parallel capital conditions
+## Parallel capital conditions and decision branches
 
-The forward runner can fork one read-only OpenD quote stream into four
-independent Paper portfolios. The requested default set is:
+The forward runner can fork one read-only OpenD quote stream into independent
+Paper portfolios. The three constrained conditions are entered in JPY and
+converted to USD before they reach the US-equity Paper risk limits:
 
-- `10万制約`: 100,000 USD starting cash and capital limit
-- `25万制約`: 250,000 USD starting cash and capital limit
-- `50万制約`: 500,000 USD starting cash and capital limit
+- `10万制約`: 100,000 JPY converted to USD
+- `25万制約`: 250,000 JPY converted to USD
+- `50万制約`: 500,000 JPY converted to USD
 - `制約なし`: no configured order or position notional limit, with 1,000,000
   USD reference starting cash so the Paper ledger can calculate equity
 
-Run the four conditions with:
+The conversion rate, timestamp, and source are written into every report. The
+default configuration uses 157.49 JPY per USD (BOJ 17:00 JST rate recorded on
+2026-09-18); pass `--usd-jpy`, `--fx-as-of`, and `--fx-source` to use another
+explicit rate.
+
+Run the four capital conditions with both decision branches using:
 
 ```bash
 /home/yappa/dev/app/Trader-Jev/.venv/bin/python -m trader_jev.forward_paper \
-  --capital-scenarios 100000,250000,500000,unconstrained
+  --capital-scenarios 10万,25万,50万,unconstrained \
+  --decision-modes rule,jev \
+  --usd-jpy 157.49
 ```
 
-The command writes one `forward-paper-<timestamp>-<scenario>.json` report per
-condition. The dashboard's `資金条件` selector switches between those reports.
-All four reports remain Paper-only and share the same market-data stream.
+The command writes eight
+`forward-paper-<timestamp>-<capital>-<mode>.json` reports. The dashboard's
+`資金条件・判断方式` selector switches between each capital condition and its
+Rule/Jev branch. Each branch has an independent Paper ledger and RiskEngine;
+only the normalized read-only quote stream is shared. All reports remain
+Paper-only.
 
 ## Jev usage cost
 
@@ -101,6 +112,8 @@ JEV_REQUEST_PRICE_USD
 JEV_PRICE_CURRENCY=USD
 ```
 
-The current forward runner uses the rule baseline by default, so its Jev cost
-is `Jev呼出なし` until a Jev-backed Paper report is generated. The dashboard
-does not call Jev and does not add any external charge.
+The forward runner uses the rule baseline by default. Include
+`--decision-modes rule,jev` to create the parallel Jev branch. The dashboard
+does not call Jev and does not add any external charge. If provider usage or
+local pricing is unavailable, the dashboard shows the call/token count and
+`単価未設定` instead of fabricating a price.

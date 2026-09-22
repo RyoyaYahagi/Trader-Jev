@@ -91,7 +91,11 @@ class ReportStore:
                     "open_orders": summary.portfolio.open_orders,
                     "scenario_id": summary.run_config.get("scenario_id", "single"),
                     "scenario_label": summary.run_config.get("scenario_label", "単一条件"),
+                    "decision_mode": summary.run_config.get("decision_mode", "RULE"),
+                    "decision_label": summary.run_config.get("decision_label", "ルール判定"),
                     "initial_capital": str(summary.portfolio.initial_capital),
+                    "jpy_capital": summary.run_config.get("jpy_capital"),
+                    "usd_jpy_rate": summary.run_config.get("usd_jpy_rate"),
                 }
             )
         return tuple(entries)
@@ -260,6 +264,12 @@ def dashboard_payload(name: str, summary: ForwardPaperSummary) -> dict[str, Any]
             "label": summary.run_config.get("scenario_label", "単一条件"),
             "initial_capital": str(portfolio.initial_capital),
             "capital_constraint": summary.run_config.get("capital_constraint"),
+            "jpy_capital": summary.run_config.get("jpy_capital"),
+            "usd_jpy_rate": summary.run_config.get("usd_jpy_rate"),
+            "fx_as_of": summary.run_config.get("fx_as_of"),
+            "fx_source": summary.run_config.get("fx_source"),
+            "decision_mode": summary.run_config.get("decision_mode", "RULE"),
+            "decision_label": summary.run_config.get("decision_label", "ルール判定"),
         },
         "run_config": dict(summary.run_config),
     }
@@ -484,7 +494,7 @@ DASHBOARD_HTML = """<!doctype html>
       <div id="run-meta" class="muted">レポートを読み込んでいます...</div>
     </div>
     <div class="toolbar">
-      <label for="report-select" class="muted">資金条件</label>
+      <label for="report-select" class="muted">資金条件・判断方式</label>
       <select id="report-select" aria-label="表示するレポート"></select>
       <button id="refresh" type="button">更新</button>
       <span id="status" class="status empty">読込中</span>
@@ -512,6 +522,10 @@ const money = (value) => {
   const n = Number(value);
   return Number.isFinite(n) ? n.toLocaleString('en-US', {minimumFractionDigits: 2, maximumFractionDigits: 2}) : '—';
 };
+const yen = (value) => {
+  const n = Number(value);
+  return Number.isFinite(n) ? n.toLocaleString('ja-JP', {maximumFractionDigits: 0}) : '—';
+};
 const integer = (value) => Number(value || 0).toLocaleString('en-US');
 const signed = (value) => {
   const n = Number(value);
@@ -532,13 +546,17 @@ function render(data) {
   setValue('unrealized-pnl', signed(p.unrealized_pnl), Number(p.unrealized_pnl || 0) >= 0 ? 'positive' : 'negative');
   setValue('fills', integer(data.fills)); setValue('events', integer(data.events_processed));
   const condition = data.capital_condition || {}; const conditionLabel = condition.label || '単一条件';
-  const constraint = condition.capital_constraint ? ` · 制約 ${money(condition.capital_constraint)} USD` : ' · 資金上限なし';
-  $('run-meta').textContent = `${conditionLabel}${constraint} · ${data.started_at} ～ ${data.finished_at} · 開始資金 ${money(p.initial_capital)} USD`;
+  const decisionLabel = condition.decision_label || 'ルール判定';
+  const constraint = condition.capital_constraint ? ` · USD制約 ${money(condition.capital_constraint)}` : ' · 資金上限なし';
+  const fx = condition.usd_jpy_rate ? ` · USD/JPY ${money(condition.usd_jpy_rate)}` : '';
+  const jpy = condition.jpy_capital ? `${yen(condition.jpy_capital)}円 → ` : '';
+  $('run-meta').textContent = `${conditionLabel} / ${decisionLabel}${constraint} · ${jpy}${money(p.initial_capital)} USD${fx} · ${data.started_at} ～ ${data.finished_at}`;
   const status = $('status'); status.textContent = data.status; status.className = 'status ' + String(data.status || '').toLowerCase();
   const alerts = $('alerts'); alerts.replaceChildren(); (data.alerts || []).forEach((message) => { const e = document.createElement('div'); e.className = 'alert'; e.textContent = '注意: ' + message; alerts.appendChild(e); });
   const positionRows = (data.positions || []).map((x) => [x.symbol, x.side, integer(x.quantity), money(x.average_price), money(x.current_price), [signed(x.unrealized_pnl), Number(x.unrealized_pnl) >= 0 ? 'positive' : 'negative']]);
   $('positions').replaceChildren(table(['銘柄', '方向', '数量', '平均価格', '現在価格', '含み損益'], positionRows));
-  const executionRows = [['判断回数', integer(data.decisions)], ['承認注文', integer(data.approved_orders)], ['リスク拒否', integer(data.risk_rejections)], ['HOLD', integer(data.holds)], ['未決済注文', integer(p.open_orders)], ['最大ドローダウン', money(p.drawdown)]];
+  const jevUsage = data.jev_usage || {};
+  const executionRows = [['判断方式', condition.decision_label || 'ルール判定'], ['Jev呼出', integer(jevUsage.request_count)], ['判断回数', integer(data.decisions)], ['承認注文', integer(data.approved_orders)], ['リスク拒否', integer(data.risk_rejections)], ['HOLD', integer(data.holds)], ['未決済注文', integer(p.open_orders)], ['最大ドローダウン', money(p.drawdown)]];
   $('execution').replaceChildren(table(['項目', '値'], executionRows));
   const fillRows = (data.fill_events || []).slice().reverse().map((x) => [x.occurred_at, x.instrument?.symbol || '—', x.side || '—', integer(x.quantity), money(x.price), money(x.fees)]);
   $('fills-table').replaceChildren(table(['約定時刻', '銘柄', '売買', '数量', '価格', '手数料'], fillRows));
@@ -559,7 +577,7 @@ function renderCosts(data) {
 }
 async function loadReports(selected) {
   const response = await fetch('/api/reports', {cache: 'no-store'}); const payload = await response.json(); const select = $('report-select');
-  const current = selected || select.value; select.replaceChildren(); (payload.reports || []).forEach((x) => { const option = document.createElement('option'); option.value = x.name; option.textContent = `${x.scenario_label || '単一条件'} · ${x.name} (${x.status})`; select.appendChild(option); });
+  const current = selected || select.value; select.replaceChildren(); (payload.reports || []).forEach((x) => { const option = document.createElement('option'); option.value = x.name; const mode = x.decision_label || x.decision_mode || 'ルール判定'; const capital = x.jpy_capital ? `${yen(x.jpy_capital)}円` : (x.initial_capital ? `${money(x.initial_capital)} USD` : '単一条件'); option.textContent = `${x.scenario_label || capital} / ${mode} · ${x.name} (${x.status})`; select.appendChild(option); });
   if (current && [...select.options].some((x) => x.value === current)) select.value = current;
   return select.value;
 }

@@ -1,9 +1,9 @@
 """Long-running, read-only-Moomoo to PaperBroker forward validation.
 
-This module deliberately has no broker or account API integration.  It polls
-normalized quotes from :class:`MoomooMarketDataAdapter`, runs a deterministic
-rule baseline, and sends only ``ExecutionMode.PAPER`` orders to
-:class:`PaperBroker`.  The resulting ledger is written as a secret-free JSON
+This module deliberately has no broker or account API integration. It polls
+normalized quotes from :class:`MoomooMarketDataAdapter`, runs a selectable Rule
+or Jev decision branch, and sends only ``ExecutionMode.PAPER`` orders to
+:class:`PaperBroker`. The resulting ledger is written as a secret-free JSON
 report by the command-line entry point.
 """
 
@@ -16,17 +16,33 @@ import logging
 from collections.abc import Mapping, Sequence
 from datetime import UTC, datetime, time, timedelta
 from decimal import ROUND_DOWN, Decimal, InvalidOperation
+from enum import StrEnum
 from pathlib import Path
 from typing import Any
 
 from pydantic import Field, field_validator
 
+from trader_jev.cli import load_env_file
 from trader_jev.clock import LiveClock
-from trader_jev.decision import RuleConfig, RuleDecisionModel
+from trader_jev.decision import (
+    JevAdapterConfig,
+    JevClient,
+    JevDecisionAdapter,
+    JevDecisionModel,
+    RuleConfig,
+    RuleDecisionModel,
+)
 from trader_jev.execution import ExecutionConfig, PaperBroker
 from trader_jev.features import InMemoryFeatureEngine
 from trader_jev.interfaces import Clock, DecisionModel, MarketDataAdapter
-from trader_jev.jev_usage import JevUsageRecord, JevUsageSummary
+from trader_jev.jev_http import JevHttpClient
+from trader_jev.jev_usage import (
+    JevPricingConfig,
+    JevUsageRecord,
+    JevUsageSummary,
+    summarize_usage,
+    usage_records_from_audits,
+)
 from trader_jev.models import (
     Action,
     DomainModel,
@@ -74,6 +90,27 @@ DEFAULT_US_SYMBOLS: tuple[str, ...] = (
     "JPM",
 )
 
+DEFAULT_USD_JPY_RATE = Decimal("157.49")
+DEFAULT_USD_JPY_AS_OF = "2026-09-18T17:00:00+09:00"
+DEFAULT_USD_JPY_SOURCE = "Bank of Japan Foreign Exchange Rates (17:00 JST)"
+
+
+class ForwardDecisionMode(StrEnum):
+    """Decision branch used by one independent forward-paper portfolio."""
+
+    RULE = "RULE"
+    JEV = "JEV"
+
+    @property
+    def label(self) -> str:
+        return "ルール判定" if self is self.RULE else "Jev判定"
+
+
+def _jpy_to_usd(jpy_amount: Decimal, usd_jpy_rate: Decimal) -> Decimal:
+    """Convert JPY to USD without allowing the simulated cash to exceed JPY cash."""
+
+    return (jpy_amount / usd_jpy_rate).quantize(Decimal("0.01"), rounding=ROUND_DOWN)
+
 
 class CapitalScenario(DomainModel):
     """One independently simulated capital condition."""
@@ -82,32 +119,51 @@ class CapitalScenario(DomainModel):
     label: str = Field(min_length=1)
     initial_capital: Decimal = Field(gt=Decimal("0"))
     capital_constraint: Decimal | None = Field(default=None, gt=Decimal("0"))
+    jpy_capital: Decimal | None = Field(default=None, gt=Decimal("0"))
+    usd_jpy_rate: Decimal | None = Field(default=None, gt=Decimal("0"))
+    fx_as_of: str | None = Field(default=None, min_length=1)
+    fx_source: str | None = Field(default=None, min_length=1)
 
 
 DEFAULT_CAPITAL_SCENARIOS: tuple[CapitalScenario, ...] = (
     CapitalScenario(
-        scenario_id="100k",
+        scenario_id="jpy-100k",
         label="10万制約",
-        initial_capital=Decimal("100000"),
-        capital_constraint=Decimal("100000"),
+        initial_capital=_jpy_to_usd(Decimal("100000"), DEFAULT_USD_JPY_RATE),
+        capital_constraint=_jpy_to_usd(Decimal("100000"), DEFAULT_USD_JPY_RATE),
+        jpy_capital=Decimal("100000"),
+        usd_jpy_rate=DEFAULT_USD_JPY_RATE,
+        fx_as_of=DEFAULT_USD_JPY_AS_OF,
+        fx_source=DEFAULT_USD_JPY_SOURCE,
     ),
     CapitalScenario(
-        scenario_id="250k",
+        scenario_id="jpy-250k",
         label="25万制約",
-        initial_capital=Decimal("250000"),
-        capital_constraint=Decimal("250000"),
+        initial_capital=_jpy_to_usd(Decimal("250000"), DEFAULT_USD_JPY_RATE),
+        capital_constraint=_jpy_to_usd(Decimal("250000"), DEFAULT_USD_JPY_RATE),
+        jpy_capital=Decimal("250000"),
+        usd_jpy_rate=DEFAULT_USD_JPY_RATE,
+        fx_as_of=DEFAULT_USD_JPY_AS_OF,
+        fx_source=DEFAULT_USD_JPY_SOURCE,
     ),
     CapitalScenario(
-        scenario_id="500k",
+        scenario_id="jpy-500k",
         label="50万制約",
-        initial_capital=Decimal("500000"),
-        capital_constraint=Decimal("500000"),
+        initial_capital=_jpy_to_usd(Decimal("500000"), DEFAULT_USD_JPY_RATE),
+        capital_constraint=_jpy_to_usd(Decimal("500000"), DEFAULT_USD_JPY_RATE),
+        jpy_capital=Decimal("500000"),
+        usd_jpy_rate=DEFAULT_USD_JPY_RATE,
+        fx_as_of=DEFAULT_USD_JPY_AS_OF,
+        fx_source=DEFAULT_USD_JPY_SOURCE,
     ),
     CapitalScenario(
         scenario_id="unconstrained",
         label="制約なし",
         initial_capital=Decimal("1000000"),
         capital_constraint=None,
+        usd_jpy_rate=DEFAULT_USD_JPY_RATE,
+        fx_as_of=DEFAULT_USD_JPY_AS_OF,
+        fx_source=DEFAULT_USD_JPY_SOURCE,
     ),
 )
 
@@ -134,6 +190,13 @@ class ForwardPaperConfig(DomainModel):
     scenario_id: str = Field(default="single", min_length=1)
     scenario_label: str = Field(default="単一条件", min_length=1)
     capital_constraint: Decimal | None = Field(default=None, gt=Decimal("0"))
+    jpy_capital: Decimal | None = Field(default=None, gt=Decimal("0"))
+    usd_jpy_rate: Decimal | None = Field(default=None, gt=Decimal("0"))
+    fx_as_of: str | None = Field(default=None, min_length=1)
+    fx_source: str | None = Field(default=None, min_length=1)
+    decision_mode: ForwardDecisionMode = ForwardDecisionMode.RULE
+    jev_model: str = Field(default="jev-latest", min_length=1)
+    jev_timeout_seconds: float = Field(default=5.0, gt=0)
 
     @field_validator("symbols")
     @classmethod
@@ -227,19 +290,11 @@ class EqualAllocationPolicy:
         return quantity - quantity % lot_size
 
 
-class _ReferencePriceRuleModel(DecisionModel):
-    """Attach a market reference price without changing the rule contract."""
+class _ReferencePriceDecisionModel(DecisionModel):
+    """Attach a market reference price without changing a decision contract."""
 
-    def __init__(self, threshold: Decimal, *, allow_short: bool) -> None:
-        self._delegate = RuleDecisionModel(
-            RuleConfig(
-                momentum_key="return_30s",
-                long_threshold=threshold,
-                short_threshold=-threshold,
-                allow_short=allow_short,
-            ),
-            strategy_id="forward-rule",
-        )
+    def __init__(self, delegate: DecisionModel) -> None:
+        self._delegate = delegate
 
     async def decide(self, snapshot: Any, prediction: Any = None) -> TradeIntent:
         intent = await self._delegate.decide(snapshot, prediction)
@@ -259,6 +314,23 @@ class _ReferencePriceRuleModel(DecisionModel):
         )
 
 
+class _ReferencePriceRuleModel(_ReferencePriceDecisionModel):
+    """Attach a market reference price to the forward rule baseline."""
+
+    def __init__(self, threshold: Decimal, *, allow_short: bool) -> None:
+        super().__init__(
+            RuleDecisionModel(
+                RuleConfig(
+                    momentum_key="return_30s",
+                    long_threshold=threshold,
+                    short_threshold=-threshold,
+                    allow_short=allow_short,
+                ),
+                strategy_id="forward-rule",
+            )
+        )
+
+
 class ForwardPaperRunner:
     """Run one live-clock forward-paper session over normalized quote events."""
 
@@ -269,10 +341,13 @@ class ForwardPaperRunner:
         market_data: MarketDataAdapter | None = None,
         clock: Clock | None = None,
         logger: logging.Logger | None = None,
+        jev_client: JevClient | None = None,
+        jev_pricing: JevPricingConfig | None = None,
     ) -> None:
         self.config = config or ForwardPaperConfig()
         self._clock = clock or LiveClock()
         self._logger = logger or logging.getLogger("trader_jev.forward_paper")
+        self._jev_pricing = jev_pricing or JevPricingConfig()
         self.instruments = build_us_instruments(self.config.symbols)
         capital_limit = self.config.capital_constraint
         if capital_limit is None and self.config.scenario_id != "unconstrained":
@@ -326,16 +401,37 @@ class ForwardPaperRunner:
             logger=self._logger,
         )
         self.feature_engine = InMemoryFeatureEngine()
-        self.decision_model = _ReferencePriceRuleModel(
-            self.config.momentum_threshold,
-            allow_short=False,
-        )
+        self._jev_adapter: JevDecisionAdapter | None = None
+        if self.config.decision_mode is ForwardDecisionMode.JEV:
+            client = jev_client or JevHttpClient.from_env()
+            self._jev_adapter = JevDecisionAdapter(
+                client,
+                config=JevAdapterConfig(
+                    timeout_seconds=self.config.jev_timeout_seconds,
+                    model_version=self.config.jev_model,
+                ),
+                clock=self._clock,
+            )
+            self.decision_model = _ReferencePriceDecisionModel(
+                JevDecisionModel(self._jev_adapter, strategy_id="forward-jev")
+            )
+        else:
+            self.decision_model = _ReferencePriceRuleModel(
+                self.config.momentum_threshold,
+                allow_short=False,
+            )
         self.pipeline = TradingPipeline(
             feature_engine=self.feature_engine,
             decision_model=self.decision_model,
             risk_engine=self.risk_engine,
             broker_adapter=self.broker,
-            config=PipelineConfig(decision_timeout_seconds=2.0),
+            config=PipelineConfig(
+                decision_timeout_seconds=(
+                    self.config.jev_timeout_seconds + 0.5
+                    if self.config.decision_mode is ForwardDecisionMode.JEV
+                    else 2.0
+                )
+            ),
             clock=self._clock,
             logger=self._logger,
         )
@@ -408,6 +504,11 @@ class ForwardPaperRunner:
 
     def _summary(self, started_at: datetime, status: str) -> ForwardPaperSummary:
         finished_at = _require_aware(self._clock.now(), "runner clock")
+        jev_usage_records = (
+            usage_records_from_audits(self._jev_adapter.audit_records, self._jev_pricing)
+            if self._jev_adapter is not None
+            else ()
+        )
         return ForwardPaperSummary(
             status=status,
             started_at=started_at,
@@ -429,8 +530,8 @@ class ForwardPaperRunner:
             fill_events=tuple(self.ledger.fills),
             order_intents=tuple(self.broker.orders),
             order_events=tuple(self.broker.order_events),
-            jev_usage=JevUsageSummary(),
-            jev_usage_records=(),
+            jev_usage=summarize_usage(jev_usage_records),
+            jev_usage_records=jev_usage_records,
             run_config={
                 "symbols": self.config.symbols,
                 "initial_capital": str(self.config.initial_capital),
@@ -441,6 +542,29 @@ class ForwardPaperRunner:
                 ),
                 "scenario_id": self.config.scenario_id,
                 "scenario_label": self.config.scenario_label,
+                "jpy_capital": (
+                    str(self.config.jpy_capital) if self.config.jpy_capital is not None else None
+                ),
+                "usd_jpy_rate": (
+                    str(self.config.usd_jpy_rate)
+                    if self.config.usd_jpy_rate is not None
+                    else None
+                ),
+                "fx_as_of": self.config.fx_as_of,
+                "fx_source": self.config.fx_source,
+                "decision_mode": self.config.decision_mode.value,
+                "decision_label": self.config.decision_mode.label,
+                "jev_model": (
+                    self.config.jev_model
+                    if self.config.decision_mode is ForwardDecisionMode.JEV
+                    else None
+                ),
+                "jev_timeout_seconds": (
+                    self.config.jev_timeout_seconds
+                    if self.config.decision_mode is ForwardDecisionMode.JEV
+                    else None
+                ),
+                "jev_pricing": self._jev_pricing.model_dump(mode="json"),
                 "runtime_seconds": self.config.runtime_seconds,
                 "decision_cadence_seconds": self.config.decision_cadence_seconds,
                 "max_positions": self.config.max_positions,
@@ -547,16 +671,19 @@ class ForwardPaperRunner:
 
 
 class ParallelForwardPaperRunner:
-    """Fork one read-only market-data stream into several Paper portfolios."""
+    """Fork one read-only market-data stream into independent Paper portfolios."""
 
     def __init__(
         self,
         config: ForwardPaperConfig | None = None,
         *,
         scenarios: Sequence[CapitalScenario] = DEFAULT_CAPITAL_SCENARIOS,
+        decision_modes: Sequence[ForwardDecisionMode | str] = (ForwardDecisionMode.RULE,),
         market_data: MarketDataAdapter | None = None,
         clock: Clock | None = None,
         logger: logging.Logger | None = None,
+        jev_client: JevClient | None = None,
+        jev_pricing: JevPricingConfig | None = None,
     ) -> None:
         base_config = config or ForwardPaperConfig()
         selected = tuple(scenarios)
@@ -565,6 +692,7 @@ class ParallelForwardPaperRunner:
         scenario_ids = [scenario.scenario_id for scenario in selected]
         if len(set(scenario_ids)) != len(scenario_ids):
             raise ValueError("capital scenario ids must be unique")
+        modes = _normalize_decision_modes(decision_modes)
         self._clock = clock or LiveClock()
         self._logger = logger or logging.getLogger("trader_jev.parallel_forward_paper")
         self.market_data = market_data or MoomooMarketDataAdapter(
@@ -572,22 +700,37 @@ class ParallelForwardPaperRunner:
         )
         self.instruments = build_us_instruments(base_config.symbols)
         self.scenarios = selected
+        self.decision_modes = modes
         self.runners = tuple(
             ForwardPaperRunner(
                 base_config.model_copy(
                     update={
                         "initial_capital": scenario.initial_capital,
-                        "portfolio_id": f"{base_config.portfolio_id}-{scenario.scenario_id}",
-                        "scenario_id": scenario.scenario_id,
-                        "scenario_label": scenario.label,
+                        "portfolio_id": f"{base_config.portfolio_id}-{runner_id}",
+                        "scenario_id": runner_id,
+                        "scenario_label": runner_label,
                         "capital_constraint": scenario.capital_constraint,
+                        "jpy_capital": scenario.jpy_capital,
+                        "usd_jpy_rate": scenario.usd_jpy_rate,
+                        "fx_as_of": scenario.fx_as_of,
+                        "fx_source": scenario.fx_source,
+                        "decision_mode": mode,
                     }
                 ),
                 market_data=self.market_data,
                 clock=self._clock,
                 logger=self._logger,
+                jev_client=jev_client,
+                jev_pricing=jev_pricing,
             )
             for scenario in selected
+            for mode in modes
+            for runner_id, runner_label in (
+                (
+                    _runner_scenario_id(scenario.scenario_id, mode, len(modes)),
+                    _runner_scenario_label(scenario.label, mode, len(modes)),
+                ),
+            )
         )
 
     async def run(self) -> tuple[ForwardPaperSummary, ...]:
@@ -633,11 +776,18 @@ def build_capital_scenarios(
     values: Sequence[str] | None = None,
     *,
     unconstrained_initial_capital: Decimal = Decimal("1000000"),
+    usd_jpy_rate: Decimal = DEFAULT_USD_JPY_RATE,
+    fx_as_of: str = DEFAULT_USD_JPY_AS_OF,
+    fx_source: str = DEFAULT_USD_JPY_SOURCE,
 ) -> tuple[CapitalScenario, ...]:
-    """Build the user-facing 10万/25万/50万/制約なし scenario set."""
+    """Build JPY-denominated capital scenarios converted to USD for PaperBroker."""
 
     if unconstrained_initial_capital <= 0:
         raise ValueError("unconstrained_initial_capital must be positive")
+    if not usd_jpy_rate.is_finite() or usd_jpy_rate <= 0:
+        raise ValueError("usd_jpy_rate must be positive and finite")
+    if not fx_as_of.strip() or not fx_source.strip():
+        raise ValueError("fx_as_of and fx_source must not be blank")
     if values is None:
         values = ("100000", "250000", "500000", "unconstrained")
 
@@ -663,6 +813,9 @@ def build_capital_scenarios(
                 scenario_id="unconstrained",
                 label="制約なし",
                 initial_capital=unconstrained_initial_capital,
+                usd_jpy_rate=usd_jpy_rate,
+                fx_as_of=fx_as_of,
+                fx_source=fx_source,
             )
         else:
             try:
@@ -671,12 +824,19 @@ def build_capital_scenarios(
                 raise ValueError(f"invalid capital scenario: {raw_value}") from exc
             if not capital.is_finite() or capital <= 0:
                 raise ValueError(f"capital scenario must be positive: {raw_value}")
+            usd_capital = _jpy_to_usd(capital, usd_jpy_rate)
+            if usd_capital <= 0:
+                raise ValueError(f"capital scenario converts to less than one cent: {raw_value}")
             scenario_id = _capital_scenario_id(capital)
             scenario = CapitalScenario(
                 scenario_id=scenario_id,
                 label=_capital_scenario_label(capital),
-                initial_capital=capital,
-                capital_constraint=capital,
+                initial_capital=usd_capital,
+                capital_constraint=usd_capital,
+                jpy_capital=capital,
+                usd_jpy_rate=usd_jpy_rate,
+                fx_as_of=fx_as_of,
+                fx_source=fx_source,
             )
         if scenario.scenario_id in seen:
             raise ValueError(f"duplicate capital scenario: {raw_value}")
@@ -711,6 +871,15 @@ def build_parser() -> argparse.ArgumentParser:
         description="Run a read-only-Moomoo, PaperBroker-only forward session.",
     )
     parser.add_argument(
+        "--env-file",
+        type=Path,
+        default=Path(".env"),
+        help=(
+            "Optional JEV env file; process environment variables take precedence "
+            "(default: .env)."
+        ),
+    )
+    parser.add_argument(
         "--symbols",
         default=",".join(DEFAULT_US_SYMBOLS),
         help="Comma-separated US symbols (default: the configured 10-symbol universe).",
@@ -740,9 +909,30 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--capital-scenarios",
         help=(
-            "Comma-separated capital scenarios to run in parallel, such as "
-            "100000,250000,500000,unconstrained."
+            "Comma-separated JPY capital scenarios to run in parallel, such as "
+            "10万,25万,50万,unconstrained."
         ),
+    )
+    parser.add_argument(
+        "--decision-modes",
+        default="rule",
+        help="Comma-separated decision branches: rule,jev (default: rule).",
+    )
+    parser.add_argument(
+        "--usd-jpy",
+        type=_positive_decimal,
+        default=DEFAULT_USD_JPY_RATE,
+        help=f"JPY per USD conversion rate (default: {DEFAULT_USD_JPY_RATE}).",
+    )
+    parser.add_argument(
+        "--fx-as-of",
+        default=DEFAULT_USD_JPY_AS_OF,
+        help="Timestamp of the configured USD/JPY rate (default: latest recorded BOJ rate).",
+    )
+    parser.add_argument(
+        "--fx-source",
+        default=DEFAULT_USD_JPY_SOURCE,
+        help="Source label recorded with the conversion rate.",
     )
     parser.add_argument(
         "--unconstrained-initial-capital",
@@ -762,6 +952,16 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
     try:
+        decision_modes = _normalize_decision_modes(tuple(args.decision_modes.split(",")))
+        env = load_env_file(args.env_file)
+        jev_client: JevClient | None = None
+        jev_pricing = JevPricingConfig.from_env(env)
+        jev_model = "jev-latest"
+        jev_timeout_seconds = 5.0
+        if ForwardDecisionMode.JEV in decision_modes:
+            jev_client = JevHttpClient.from_env(env)
+            jev_model = jev_client.config.model
+            jev_timeout_seconds = jev_client.config.timeout_seconds
         config = ForwardPaperConfig(
             symbols=tuple(args.symbols.split(",")),
             initial_capital=args.initial_capital,
@@ -776,14 +976,25 @@ def main(argv: Sequence[str] | None = None) -> int:
             market_hours_only=args.market_hours_only,
             poll_interval_seconds=args.poll_interval_seconds,
             portfolio_id=args.portfolio_id,
+            jev_model=jev_model,
+            jev_timeout_seconds=jev_timeout_seconds,
         )
         if args.capital_scenarios:
             scenarios = build_capital_scenarios(
                 tuple(args.capital_scenarios.split(",")),
                 unconstrained_initial_capital=args.unconstrained_initial_capital,
+                usd_jpy_rate=args.usd_jpy,
+                fx_as_of=args.fx_as_of,
+                fx_source=args.fx_source,
             )
             summaries = asyncio.run(
-                ParallelForwardPaperRunner(config, scenarios=scenarios).run()
+                ParallelForwardPaperRunner(
+                    config,
+                    scenarios=scenarios,
+                    decision_modes=decision_modes,
+                    jev_client=jev_client,
+                    jev_pricing=jev_pricing,
+                ).run()
             )
             encoded = json.dumps(
                 [summary.model_dump(mode="json") for summary in summaries],
@@ -795,7 +1006,40 @@ def main(argv: Sequence[str] | None = None) -> int:
                 print(f"report: {_write_report(args.report_dir, summary)}")
             return 0 if all(summary.status == "COMPLETED" for summary in summaries) else 2
 
-        summary = asyncio.run(ForwardPaperRunner(config).run())
+        if len(decision_modes) != 1:
+            scenarios = build_capital_scenarios(
+                usd_jpy_rate=args.usd_jpy,
+                fx_as_of=args.fx_as_of,
+                fx_source=args.fx_source,
+                unconstrained_initial_capital=args.unconstrained_initial_capital,
+            )
+            summaries = asyncio.run(
+                ParallelForwardPaperRunner(
+                    config,
+                    scenarios=scenarios,
+                    decision_modes=decision_modes,
+                    jev_client=jev_client,
+                    jev_pricing=jev_pricing,
+                ).run()
+            )
+            encoded = json.dumps(
+                [summary.model_dump(mode="json") for summary in summaries],
+                ensure_ascii=False,
+                indent=2,
+            )
+            print(encoded)
+            for summary in summaries:
+                print(f"report: {_write_report(args.report_dir, summary)}")
+            return 0 if all(summary.status == "COMPLETED" for summary in summaries) else 2
+
+        config = config.model_copy(update={"decision_mode": decision_modes[0]})
+        summary = asyncio.run(
+            ForwardPaperRunner(
+                config,
+                jev_client=jev_client,
+                jev_pricing=jev_pricing,
+            ).run()
+        )
         encoded = json.dumps(summary.model_dump(mode="json"), ensure_ascii=False, indent=2)
         print(encoded)
         print(f"report: {_write_report(args.report_dir, summary)}")
@@ -821,9 +1065,9 @@ def _write_report(report_dir: Path, summary: ForwardPaperSummary) -> Path:
 
 def _capital_scenario_id(capital: Decimal) -> str:
     known_ids = {
-        Decimal("100000"): "100k",
-        Decimal("250000"): "250k",
-        Decimal("500000"): "500k",
+        Decimal("100000"): "jpy-100k",
+        Decimal("250000"): "jpy-250k",
+        Decimal("500000"): "jpy-500k",
     }
     if capital in known_ids:
         return known_ids[capital]
@@ -833,6 +1077,56 @@ def _capital_scenario_id(capital: Decimal) -> str:
 def _capital_scenario_label(capital: Decimal) -> str:
     ten_thousand = capital / Decimal("10000")
     return f"{ten_thousand.normalize():f}万制約"
+
+
+def _runner_scenario_id(
+    scenario_id: str,
+    mode: ForwardDecisionMode,
+    mode_count: int,
+) -> str:
+    if mode_count == 1 and mode is ForwardDecisionMode.RULE:
+        return scenario_id
+    return f"{scenario_id}-{mode.value.lower()}"
+
+
+def _runner_scenario_label(
+    label: str,
+    mode: ForwardDecisionMode,
+    mode_count: int,
+) -> str:
+    if mode_count == 1 and mode is ForwardDecisionMode.RULE:
+        return label
+    return f"{label} / {mode.label}"
+
+
+def _normalize_decision_modes(
+    values: Sequence[ForwardDecisionMode | str],
+) -> tuple[ForwardDecisionMode, ...]:
+    if not values:
+        raise ValueError("at least one decision mode is required")
+    aliases = {
+        "RULE": ForwardDecisionMode.RULE,
+        "ルール": ForwardDecisionMode.RULE,
+        "ルール判定": ForwardDecisionMode.RULE,
+        "JEV": ForwardDecisionMode.JEV,
+        "Jev": ForwardDecisionMode.JEV,
+        "JEV判定": ForwardDecisionMode.JEV,
+    }
+    modes: list[ForwardDecisionMode] = []
+    for raw_value in values:
+        if isinstance(raw_value, ForwardDecisionMode):
+            mode = raw_value
+        else:
+            normalized = str(raw_value).strip()
+            mode = aliases.get(normalized.upper())
+            if mode is None:
+                mode = aliases.get(normalized)
+            if mode is None:
+                raise ValueError(f"invalid decision mode: {raw_value}")
+        if mode in modes:
+            raise ValueError(f"duplicate decision mode: {raw_value}")
+        modes.append(mode)
+    return tuple(modes)
 
 
 def _decimal_metadata(metadata: Mapping[str, Any], name: str) -> Decimal | None:
@@ -853,6 +1147,13 @@ def _decimal(value: str) -> Decimal:
         raise argparse.ArgumentTypeError("value must be a decimal") from exc
     if not parsed.is_finite():
         raise argparse.ArgumentTypeError("value must be finite")
+    return parsed
+
+
+def _positive_decimal(value: str) -> Decimal:
+    parsed = _decimal(value)
+    if parsed <= 0:
+        raise argparse.ArgumentTypeError("value must be positive")
     return parsed
 
 
@@ -890,7 +1191,11 @@ __all__ = [
     "CapitalScenario",
     "DEFAULT_US_SYMBOLS",
     "DEFAULT_CAPITAL_SCENARIOS",
+    "DEFAULT_USD_JPY_AS_OF",
+    "DEFAULT_USD_JPY_RATE",
+    "DEFAULT_USD_JPY_SOURCE",
     "EqualAllocationPolicy",
+    "ForwardDecisionMode",
     "ForwardPaperConfig",
     "ForwardPaperRunner",
     "ForwardPaperSummary",

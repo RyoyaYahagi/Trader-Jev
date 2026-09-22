@@ -9,6 +9,7 @@ import pytest
 from trader_jev.clock import FixedClock
 from trader_jev.forward_paper import (
     CapitalScenario,
+    ForwardDecisionMode,
     ForwardPaperConfig,
     ForwardPaperRunner,
     ParallelForwardPaperRunner,
@@ -32,6 +33,22 @@ class FakeMarketData:
         self.instruments = tuple(instruments)
         for event in self.events:
             yield event
+
+
+class FakeJevClient:
+    def __init__(self) -> None:
+        self.calls = 0
+
+    async def decide(self, request: object) -> dict[str, object]:
+        del request
+        self.calls += 1
+        return {
+            "action": "HOLD",
+            "direction_5m": "FLAT",
+            "regime": "RANGE",
+            "confidence": "0.2",
+            "usage": {"input_tokens": 10, "output_tokens": 5, "total_tokens": 15},
+        }
 
 
 def quote(
@@ -165,10 +182,62 @@ def test_capital_scenario_parser_supports_requested_labels() -> None:
     scenarios = build_capital_scenarios(("10万", "25万", "50万", "制約なし"))
 
     assert [scenario.scenario_id for scenario in scenarios] == [
-        "100k",
-        "250k",
-        "500k",
+        "jpy-100k",
+        "jpy-250k",
+        "jpy-500k",
         "unconstrained",
     ]
+    assert [scenario.initial_capital for scenario in scenarios[:3]] == [
+        Decimal("634.96"),
+        Decimal("1587.40"),
+        Decimal("3174.80"),
+    ]
+    assert [scenario.jpy_capital for scenario in scenarios[:3]] == [
+        Decimal("100000"),
+        Decimal("250000"),
+        Decimal("500000"),
+    ]
+    assert all(scenario.usd_jpy_rate == Decimal("157.49") for scenario in scenarios)
     assert scenarios[-1].capital_constraint is None
     assert scenarios[-1].initial_capital == Decimal("1000000")
+
+
+@pytest.mark.asyncio
+async def test_parallel_forward_paper_runs_rule_and_jev_branches_independently() -> None:
+    instrument = build_us_instruments(("AAPL",))[0]
+    market_data = FakeMarketData(
+        (
+            quote(instrument, event_time=NOW - timedelta(seconds=31), mid=Decimal("100")),
+            quote(instrument, event_time=NOW, mid=Decimal("101")),
+        )
+    )
+    jev_client = FakeJevClient()
+    runner = ParallelForwardPaperRunner(
+        ForwardPaperConfig(
+            symbols=("AAPL",),
+            runtime_seconds=60,
+            decision_cadence_seconds=0,
+            max_positions=1,
+            market_hours_only=False,
+        ),
+        scenarios=build_capital_scenarios(("10万",), usd_jpy_rate=Decimal("100")),
+        decision_modes=(ForwardDecisionMode.RULE, ForwardDecisionMode.JEV),
+        market_data=market_data,
+        clock=FixedClock(NOW),
+        jev_client=jev_client,
+    )
+
+    summaries = await runner.run()
+
+    assert [summary.run_config["decision_mode"] for summary in summaries] == ["RULE", "JEV"]
+    assert [summary.run_config["scenario_label"] for summary in summaries] == [
+        "10万制約 / ルール判定",
+        "10万制約 / Jev判定",
+    ]
+    assert summaries[0].portfolio.initial_capital == Decimal("1000.00")
+    assert summaries[1].portfolio.initial_capital == Decimal("1000.00")
+    assert summaries[0].jev_usage.request_count == 0
+    assert summaries[1].jev_usage.request_count == 2
+    assert len(summaries[1].jev_usage_records) == 2
+    assert summaries[1].jev_usage.cost_status == "UNPRICED"
+    assert jev_client.calls == 2

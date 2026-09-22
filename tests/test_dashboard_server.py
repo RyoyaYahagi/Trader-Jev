@@ -95,6 +95,40 @@ def test_report_store_loads_latest_and_dashboard_payload(tmp_path: Path) -> None
     assert payload["fill_events"][0]["quantity"] == 10
 
 
+def test_dashboard_payload_exposes_jpy_conversion_and_decision_branch() -> None:
+    summary = make_summary().model_copy(
+        update={
+            "run_config": {
+                "execution_mode": "PAPER",
+                "scenario_id": "jpy-100k-jev",
+                "scenario_label": "10万制約 / Jev判定",
+                "jpy_capital": "100000",
+                "usd_jpy_rate": "157.49",
+                "fx_as_of": "2026-09-18T17:00:00+09:00",
+                "fx_source": "Bank of Japan",
+                "decision_mode": "JEV",
+                "decision_label": "Jev判定",
+                "capital_constraint": "634.96",
+            }
+        }
+    )
+
+    payload = dashboard_payload("forward-paper-test.json", summary)
+
+    assert payload["capital_condition"] == {
+        "scenario_id": "jpy-100k-jev",
+        "label": "10万制約 / Jev判定",
+        "initial_capital": "10000",
+        "capital_constraint": "634.96",
+        "jpy_capital": "100000",
+        "usd_jpy_rate": "157.49",
+        "fx_as_of": "2026-09-18T17:00:00+09:00",
+        "fx_source": "Bank of Japan",
+        "decision_mode": "JEV",
+        "decision_label": "Jev判定",
+    }
+
+
 def test_report_store_rejects_path_traversal(tmp_path: Path) -> None:
     store = ReportStore(tmp_path)
 

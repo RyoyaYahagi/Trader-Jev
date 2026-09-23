@@ -21,14 +21,14 @@ set +a
 http://127.0.0.1:4789/v1/systemone
 ```
 
-Gatewayの上流キーはアプリケーションではなく、Gatewayサービスが `pass` から読み込みます。
+Gatewayの上流キーはアプリケーションではなく、systemd運用ではGatewayサービスが暗号化Credentialから読み込みます。`pass` + GPGは互換用のlegacyバックエンドです。
 Gatewayにローカル認証を設定している場合だけ、次を設定します。
 
 - `JEV_GATEWAY_URL`: Gatewayの完全なPOST先。未設定時は上記の既定値、空文字なら直接接続へ切替
 - `JEV_GATEWAY_TOKEN`: Gateway専用の任意のローカルBearerトークン。上流APIキーとは別物
 
-直接TypeSafeへ接続する場合だけ、次の上流認証を設定します。Gateway使用時は読み込まれて
-いても送信しません。
+直接TypeSafeへ接続する場合だけ、次の上流認証を設定します。Gateway使用時はTrader-Jevの
+`.env`へ上流キーを設定しません。
 
 - `JEV_API_KEY`: TypeSafe APIキー
 - `TYPESAFE_API_KEY`: TypeSafe公式ドキュメントの環境変数名。`JEV_API_KEY` の代わりに使用可能
@@ -96,6 +96,17 @@ Gateway使用時は、上流TypeSafeのAPIキーをアプリケーションか�
 `Authorization: Bearer <GATEWAY_TOKEN>` として送信します。直接接続時だけ、TypeSafeの
 APIキーを `Authorization: Bearer <API_KEY>` として送信します。いずれの認証情報もURL・
 リクエスト本文・監査レスポンス・エラーメッセージへ含めません。
+
+systemd user serviceでGatewayを運用する場合は、Gateway側で暗号化Credentialを作成してから
+起動します。APIキーの登録・暗号化はGatewayリポジトリの次のスクリプトで行います。
+
+```bash
+cd /home/yappa/dev/app/jev-gateway
+./scripts/provision-systemd-credential.sh
+./scripts/install-user-systemd.sh
+```
+
+この構成では、Jev APIキーはTrader-Jevの`.env`、プロセス環境変数、コマンドラインへ渡しません。
 
 ## Paper実行CLI
 

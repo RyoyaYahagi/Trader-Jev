@@ -52,12 +52,12 @@ Market data sourceはBroker APIに固定しない。Historical dataset / file / 
 - 15分・30分の予測は、対応するJev質問セットを追加した後のバックログ候補とする
 - Initial decision interval: 30秒相当
 - 探索候補: 15秒 / 30秒 / 60秒
-- 初期対象: 固定10銘柄
+- 初期 Forward Paper 対象: 固定10銘柄
 - Replayでも各candidateのdecision cadenceを再現可能にする
 
 ## 5. Universe
 
-Phase 1は固定10銘柄。
+既存の初期 Forward Paper は固定10銘柄を使う。追加の研究プロファイルとして、米国上場株の読み取り専用ユニバース更新と動的スクリーニングを利用できる。これは固定10銘柄の既定経路を置き換えない。
 
 選定条件:
 
@@ -69,9 +69,9 @@ Phase 1は固定10銘柄。
 10万円制約は銘柄選定条件にしない。
 
 その後:
-1. 固定10銘柄
+1. 固定10銘柄（初期 Forward Paper の既定）
 2. 主要指数銘柄
-3. 動的選定
+3. 動的選定（任意の米国株研究プロファイルとして利用可能）
 
 Phase 1完了後は月次見直しを可能にする。
 
@@ -230,11 +230,12 @@ Stage 1:
 Stage 2:
 - 読み取り専用のmoomoo OpenD market snapshotをRealtime Adapterから取得
 - OpenD停止・権限エラー・欠損bid/askはfail closed
+- 米国株の任意研究プロファイルで銘柄情報・スクリーナー・snapshot・購読済み1分足を取得
 
 Stage 3:
 - L2 dataが入手可能になった場合にL2-aware replay/featureへ拡張
 
-現在のmilestoneでは「kabuステーションからデータを取得する」ことと、moomooのL2・取引・口座状態APIを実装しない。今回の対象はmoomooの読み取り専用snapshot quoteのみである。
+現在のmilestoneでは「kabuステーションからデータを取得する」ことと、moomooのL2・取引・口座状態APIを実装しない。moomoo接続は読み取り専用の銘柄情報、スクリーナー、snapshot quote、購読済み1分足に限る。動的ユニバースの設定、保存先、実行方法は[米国株Universe Paperガイド](US_UNIVERSE_PAPER.md)を参照する。
 
 ## 17. Technical stack
 

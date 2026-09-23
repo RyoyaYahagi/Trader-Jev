@@ -39,9 +39,7 @@ class FakeResponse:
 
 def test_from_env_requires_api_key() -> None:
     with pytest.raises(ValueError, match=r"JEV_API_KEY \(or TYPESAFE_API_KEY\) is required"):
-        JevHttpClient.from_env(
-            {"JEV_GATEWAY_URL": "", "JEV_BASE_URL": "https://jev.example"}
-        )
+        JevHttpClient.from_env({"JEV_GATEWAY_URL": "", "JEV_BASE_URL": "https://jev.example"})
 
 
 def test_from_env_defaults_to_local_gateway_without_upstream_key() -> None:
@@ -184,6 +182,43 @@ async def test_client_posts_typed_request_with_secret_in_header_only(
     assert result["p_up"] == Decimal("0.8")
     assert result["usage"] == {"input_tokens": 10, "output_tokens": 20}
     assert "secret-value" not in sent_request.data.decode("utf-8")
+
+
+@pytest.mark.asyncio
+async def test_custom_typed_questions_are_sent_and_raw_answers_are_returned(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured: dict[str, Any] = {}
+    response = {
+        "answers": {
+            "trade_worthy": {"type": "noul", "noul": 0.72},
+            "setup_type": {
+                "type": "choice",
+                "choice": "TREND_CONTINUATION",
+                "probabilities": {"TREND_CONTINUATION": 0.8, "NO_SETUP": 0.2},
+                "confidence": 0.8,
+            },
+        }
+    }
+
+    def fake_urlopen(request: Request, timeout: float) -> FakeResponse:
+        del timeout
+        captured["request"] = request
+        return FakeResponse(json.dumps(response).encode("utf-8"))
+
+    monkeypatch.setattr("trader_jev.jev_http.safe_urlopen", fake_urlopen)
+    client = JevHttpClient.from_env({})
+    questions = {
+        "setup_type": {"type": "choice", "criteria": {"NO_SETUP": "No setup"}},
+        "trade_worthy": {"type": "noul", "instructions": "Is it trade worthy?"},
+    }
+
+    raw = await client.ask(_request(), questions)
+
+    request = captured["request"]
+    sent_body = json.loads(request.data.decode("utf-8"))
+    assert sent_body["questions"] == questions
+    assert raw == response
 
 
 @pytest.mark.asyncio

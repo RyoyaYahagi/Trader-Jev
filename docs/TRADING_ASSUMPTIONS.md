@@ -25,10 +25,11 @@ Market dataはHistorical / Replayを優先する。Forward Paperで必要な場�
 
 ## Initial universe
 
-- 固定10銘柄
+- 初期 Forward Paper は固定10銘柄
 - 流動性 + 業種分散 + 日中ボラティリティ
 - 月次見直しは後段
 - 10万円で1単元買えることを選定条件にしない
+- 米国株の任意研究プロファイルでは、読み取り専用の銘柄情報・スクリーナーで候補を更新できる。これは固定10銘柄の既定運用を変更しない
 
 ## Timing
 
@@ -38,6 +39,7 @@ Market dataはHistorical / Replayを優先する。Forward Paperで必要な場�
 - U.S. forward paper: NASDAQ regular session 09:30〜16:00 ET
 - U.S. daylight saving time and standard time are resolved by `America/New_York`
 - NASDAQ holidays are skipped; published 13:00 ET early closes end the session early
+- 米国株Universe Paperの特徴量は、snapshot時刻以前の当日regular session内1分足から計算する。session VWAPに前日・時間外データを含めない
 
 ## Direction
 

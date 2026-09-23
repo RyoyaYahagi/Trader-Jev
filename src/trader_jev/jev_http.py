@@ -130,9 +130,7 @@ class JevHttpClient:
         values: Mapping[str, str] = os.environ if env is None else env
         gateway_setting = values.get("JEV_GATEWAY_URL")
         gateway_url = (
-            DEFAULT_JEV_GATEWAY_URL
-            if gateway_setting is None
-            else gateway_setting.strip() or None
+            DEFAULT_JEV_GATEWAY_URL if gateway_setting is None else gateway_setting.strip() or None
         )
         if gateway_url is not None:
             gateway_token = values.get("JEV_GATEWAY_TOKEN", "").strip()
@@ -179,7 +177,40 @@ class JevHttpClient:
         normalized["latency_ms"] = int((monotonic() - started) * 1000)
         return normalized
 
-    def _typesafe_request(self, request: JevRequest) -> dict[str, Any]:
+    async def ask(
+        self,
+        request: JevRequest,
+        questions: Mapping[str, Mapping[str, Any]],
+    ) -> Mapping[str, Any]:
+        """Send custom typed questions through the existing safe HTTP transport.
+
+        The caller owns parsing because not every research question maps to the
+        fixed LONG/SHORT/HOLD decision schema used by :meth:`decide`.
+        """
+
+        raw = await asyncio.to_thread(
+            self._post_json,
+            self._typesafe_request(request, questions=questions),
+        )
+        if isinstance(raw, Mapping):
+            return raw
+        if isinstance(raw, str):
+            try:
+                decoded: Any = json.loads(raw)
+            except json.JSONDecodeError as exc:
+                raise JevHttpError("Jev response was not valid JSON") from exc
+            if isinstance(decoded, Mapping):
+                return cast(Mapping[str, Any], decoded)
+        if isinstance(raw, JevDecision):
+            return cast(Mapping[str, Any], raw.model_dump(mode="json"))
+        raise JevHttpError("Jev response must be a JSON object")
+
+    def _typesafe_request(
+        self,
+        request: JevRequest,
+        *,
+        questions: Mapping[str, Mapping[str, Any]] | None = None,
+    ) -> dict[str, Any]:
         state = dict(request.payload)
         state.update(
             {
@@ -194,7 +225,7 @@ class JevHttpClient:
         return {
             "state": state,
             "model": self.config.model,
-            "questions": _typesafe_questions(),
+            "questions": _typesafe_questions() if questions is None else dict(questions),
         }
 
     def _post_json(self, body: Mapping[str, Any]) -> JevDecision | Mapping[str, Any] | str:
@@ -242,9 +273,7 @@ class JevHttpClient:
                 "User-Agent": "trader-jev/0.1",
             }
             if self.config.gateway_token is not None:
-                headers["Authorization"] = (
-                    f"Bearer {self.config.gateway_token.get_secret_value()}"
-                )
+                headers["Authorization"] = f"Bearer {self.config.gateway_token.get_secret_value()}"
             return headers
         if self.config.api_key is None:
             raise JevHttpError("Jev HTTP client has no direct API key")

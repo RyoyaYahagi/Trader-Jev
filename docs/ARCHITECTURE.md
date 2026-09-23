@@ -31,6 +31,8 @@ DecisionSnapshot
 
 実行経路はPaperBrokerのみ実装対象。リアルタイム入力として、読み取り専用の`MoomooMarketDataAdapter`を使用できる。
 
+米国株には、`USUniversePaperRunner`による任意の研究経路がある。銘柄情報とスクリーナー結果から候補を絞り、snapshotと購読済み1分足を使って特徴を作り、Jev判断をRiskEngine経由でPaperBrokerへ渡す。この経路も証券APIによる発注・口座照会を含まない。初期 Forward Paper の固定10銘柄設定は独立して維持する。
+
 ## 2. Broker API policy
 
 kabuステーションAPIは現在使用しない。moomoo APIは`MoomooMarketDataAdapter`から市場データを読み取る用途に限って使用する。
@@ -61,6 +63,7 @@ Current:
 - ReplayMarketDataAdapter
 - File/HistoricalDataAdapter
 - MoomooMarketDataAdapter（OpenDのmarket snapshotをQuoteEventへ変換）
+- USUniversePaperRunner用moomoo quote adapter（銘柄情報、スクリーナー、snapshot、購読済み1分足を米国株ドメインモデルへ変換）
 
 Future only:
 - realtime external feed adapters

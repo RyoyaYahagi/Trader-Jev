@@ -1,0 +1,57 @@
+# Read-only moomoo U.S. equity research and PaperBroker settings.
+# Supply a current USD/JPY rate and its provenance before running paper-step.
+database_path: data/us_equity_paper.sqlite3
+include_etf: false
+include_otc: false
+universe_refresh_days: 1
+
+min_price_usd: 3
+min_market_cap_usd: 300000000
+min_avg_turnover_20d_usd: 10000000
+min_listing_days: 90
+max_screen_rows: 2000
+
+lane_top_k: 50
+union_limit: 200
+minute_bar_candidates: 30
+jev_candidates: 30
+minute_bar_count: 390
+cached_bars_max_age_seconds: 120
+max_quote_age_seconds: 15
+decision_interval_seconds: 30
+quant_lane_weight: 0.25
+alpha_quant: 0.4
+beta_jev: 0.6
+min_jev_confidence: 0.55
+min_trade_worthy_probability: 0.6
+max_abnormal_probability: 0.35
+
+initial_cash_jpy: 100000
+usd_jpy_rate: null
+fx_as_of: null
+fx_source: null
+cash_reserve_pct: 0.1
+max_positions: 3
+max_position_pct: 0.3
+max_drawdown_pct: 0.05
+max_spread_bps: 50
+slippage_bps: 10
+estimated_fee_bps: 13.2
+fee_bps: 0
+fee_schedule: MOOMOO_US_BASIC
+stop_loss_pct: 0.02
+take_profit_pct: 0.03
+max_holding_seconds: 900
+risk_profile: CONSERVATIVE
+portfolio_id: us-equities-100k
+
+moomoo:
+  connection_timeout_seconds: 8
+  screen_requests_per_30_seconds: 10
+  snapshot_requests_per_30_seconds: 60
+  max_screen_page_size: 200
+  max_snapshot_batch_size: 400
+  retry_attempts: 2
+  retry_initial_seconds: 0.5
+  minute_bar_count: 390
+  minute_bar_type: K_1M

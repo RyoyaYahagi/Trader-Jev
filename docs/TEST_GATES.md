@@ -4,7 +4,7 @@ Trader-Jevでは各Issueのunit/integration testに加えて、5つの明示的�
 
 **Gate未通過の状態で後続Phaseへ進まない。**
 
-この5つは **現在のPaper milestone用Test Gates** である。kabuステーションAPI / moomoo API / 実口座接続は現在のテスト対象に含めない。将来Live milestoneを開始した際には、Shadow/Live専用の追加ゲートを別途設ける。
+この5つは **現在のPaper milestone用Test Gates** である。kabuステーションAPIとmoomooの取引・口座API・実注文は現在のテスト対象に含めない。読み取り専用のmoomoo quote adapterを使う場合は、OpenD接続、欠損データ、権限エラー、再接続方針を別途テストする。将来Live milestoneを開始した際には、Shadow/Live専用の追加ゲートを別途設ける。
 
 ---
 
@@ -188,14 +188,15 @@ Issue #13 Dashboard / Observability と Issue #14 Paper validation gate 完了�
 - process restart後にPortfolioを復元可能
 -同一experimentを再実行して再現性を確認
 - secret/API credentialを必要としない
-- kabuステーション/moomooへの通信が存在しない
+- kabuステーションへの通信が存在しない
+- moomooへの通信がある場合も、読み取り専用quote取得に限られる
 
 ### Final scope check
 
 Current milestone完了時点でも:
 
 - real brokerage order = 0
-- real brokerage authentication = 0
+- real brokerage trade/account authentication handled by Trader-Jev = 0
 - broker account read = 0
 
 であること。

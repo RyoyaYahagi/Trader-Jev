@@ -17,23 +17,23 @@ Trader-Jev は、短期市場データを Jev で統合し、3〜5分程度の�
 - Risk Profile
 - 資金・単元・同時保有数制約
 
-## 2. Current scope: Paper-only
+## 2. Current scope: Paper execution with read-only realtime quotes
 
-現在のmilestoneでは外部Broker APIを使用しない。
+現在のmilestoneでは実注文を実装しない。市場データ入力として、ユーザーが起動したmoomoo OpenDから読み取り専用のリアルタイム株価を取得できる。
 
 ### Explicitly out of scope for the current milestone
 
 - kabuステーションAPI
-- moomoo API
-- 証券口座ログイン/認証
+- moomoo trade API
+- アプリケーションによる証券口座ログイン情報の保持
 - 実口座残高/position/order取得
 - Shadow Brokerによる証券API接続
 - Live order送信
 - KabuStationBroker / MoomooBroker の具象実装
 
-将来のLive milestoneで KabuStationBroker / MoomooBroker 等を追加する前提で BrokerAdapter interface は保持する。ただし現在は PaperBroker のみ実装する。
+将来のLive milestoneで KabuStationBroker / MoomooBroker 等を追加する前提で BrokerAdapter interface は保持する。ただし現在の注文実行はPaperBrokerのみとする。`MoomooMarketDataAdapter`はBrokerAdapterではなく、QuoteEventを生成する読み取り専用MarketDataAdapterである。
 
-Market data sourceはBroker APIに固定しない。Historical dataset / file / replay adapterを優先し、リアルタイム外部データ源は別途選定されるまで具象実装しない。
+Market data sourceはBroker APIに固定しない。Historical dataset / file / replay adapterを優先し、必要な場合はmoomoo OpenDの読み取り専用quote sourceを差し替え可能な形で使用する。
 
 ## 3. Markets
 
@@ -48,10 +48,12 @@ Market data sourceはBroker APIに固定しない。Historical dataset / file / 
 
 ## 4. Trading horizon and cadence
 
-- Primary prediction horizon: 3〜5分
-- Initial decision interval: 15秒相当
+- Primary prediction horizon: 5分
+- 15分・30分の予測は、対応するJev質問セットを追加した後のバックログ候補とする
+- Initial decision interval: 30秒相当
+- 探索候補: 15秒 / 30秒 / 60秒
 - 初期対象: 固定10銘柄
-- Replayでも15秒decision cadenceを再現可能にする
+- Replayでも各candidateのdecision cadenceを再現可能にする
 
 ## 5. Universe
 
@@ -100,6 +102,8 @@ Jevへは最新特徴量 + compact short history summaryを渡す。
 - virtual portfolio state
 - data quality
 
+初期の自律Forward Paperでは、ニュースとMLを含まない `TECHNICAL_ONLY` と `MICROSTRUCTURE` の2入力プロファイルだけを使用する。ニュース・ML・保有状態を使う入力は、比較カタログ上の後段候補として扱う。
+
 長い生時系列を毎回渡さない。
 
 ## 8. Jev decision schema
@@ -109,9 +113,8 @@ Jevへは最新特徴量 + compact short history summaryを渡す。
 - regime
 - setup_quality
 - probabilities / confidence
-- optional news_invalidates_signal
 
-Confidence thresholdは事前固定しない。Paper結果からthreshold / top-2 margin別に分析する。
+初期の方向ゲートは `p_up >= 0.60` かつ `p_up - max(p_flat, p_down) >= 0.10` とする。探索では `0.60/0.20`、`0.70/0.10` も同じデータ・同じ出口条件で比較し、いずれも最終採用値とはみなさない。確率は利益確率そのものではないため、確率帯ごとの実現結果、取引数、手数料控除後損益を記録する。
 
 ## 9. ML role
 
@@ -186,19 +189,22 @@ Primary:
 - Hybrid Exit
 
 Components:
-- max holding 5 min
+- max holding 15 min
 - stop-loss
 - take-profit
 - strong opposite signal
 - forced time exit
 
-Baseline:
-- fixed 5-minute exit
+Initial Paper baseline:
+- ATR(14) × 1.0 stop distance
+- take-profit = 1.5R（RはATR stop distance）
+- ATRが利用できない場合のfallbackは固定1% stop / 2% take-profit
+- 最大保有時間15分
 
 Stop/TP rollout:
-1. fixed %
-2. ATR / realized-volatility
-3. confidence-aware later
+1. 初期: ATR(14) / 1.0 stop / 1.5R / 15分
+2. 探索: cadence 15/30/60秒、最大保有15/30分、stop 1.0/1.5 ATR
+3. 将来: realized-volatility、confidence-aware、Jevの保有中出口審査
 
 ## 15. Historical and Paper evaluation
 
@@ -214,7 +220,7 @@ Historical Replayは以下に使う。
 
 JevのHistorical評価は学習済み知識混入の可能性があるため、参考値として扱う。
 
-外部Broker APIを使わない期間でも、Paper runtimeを完成させ、将来別途選定したリアルタイムdata sourceを差し替えられるようにする。
+外部Brokerの取引APIを使わない期間でも、Paper runtimeを完成させる。`MoomooMarketDataAdapter`から得たQuoteEventは、保存・Feature Engine・Paper実行へ既存の境界を通して渡す。
 
 ## 16. Data rollout
 
@@ -222,12 +228,13 @@ Stage 1:
 - 取得済み/利用可能な1分足・Tick等でReplay基盤
 
 Stage 2:
-- 非Brokerの外部market data sourceを別途選定した場合のみRealtime Adapterを追加
+- 読み取り専用のmoomoo OpenD market snapshotをRealtime Adapterから取得
+- OpenD停止・権限エラー・欠損bid/askはfail closed
 
 Stage 3:
 - L2 dataが入手可能になった場合にL2-aware replay/featureへ拡張
 
-現在のmilestoneでは「kabuステーション/moomooからL2を取得する」は実装しない。
+現在のmilestoneでは「kabuステーションからデータを取得する」ことと、moomooのL2・取引・口座状態APIを実装しない。今回の対象はmoomooの読み取り専用snapshot quoteのみである。
 
 ## 17. Technical stack
 

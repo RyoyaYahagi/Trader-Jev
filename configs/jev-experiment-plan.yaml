@@ -1,0 +1,155 @@
+schema_version: "1"
+plan_id: jev-input-output-v1
+name: Jev input and decision policy comparison
+purpose: Compare what Jev predicts and where its answer is used in a Paper replay.
+replicates: 1
+context:
+  code_version: REPLACE_WITH_GIT_COMMIT
+  data_manifest_version: REPLACE_WITH_DATA_MANIFEST
+  jev_model_version: jev-latest
+  question_set_version: jev-decision-v1
+base_config:
+  execution_mode: PAPER
+  decision_interval_seconds: 30
+  prediction_horizon_minutes: 5
+  exit_mode: ATR
+  atr_period: 14
+  stop_atr_multiple: "1.0"
+  take_profit_r_multiple: "1.5"
+  max_holding_seconds: 900
+  entry_min_up_probability: "0.60"
+  entry_min_direction_margin: "0.10"
+  universe_id: fixed-10
+  fee_schedule: explicit-in-run-config
+  jev_response_cache: required
+operations:
+  mode: FORWARD_PAPER
+  daily_run_limit: 2
+  max_concurrent_runs: 2
+  poll_interval_seconds: 60
+  stale_after_seconds: 7200
+  budget_timezone: America/New_York
+splits:
+  - split_id: discovery
+    kind: DISCOVERY
+    data_id: historical-discovery-period
+    selection_allowed: true
+  - split_id: validation
+    kind: VALIDATION
+    data_id: historical-validation-period
+    selection_allowed: true
+cases:
+  - case_id: jev-direct-action
+    name: Jev action directly creates a trade intent
+    description: Use Jev's LONG, SHORT, or HOLD answer as the candidate action.
+    input_profile: MICROSTRUCTURE
+    prediction_target: ACTION_NEXT_INTERVAL
+    decision_use: DIRECT_ACTION
+    output_policy:
+      kind: DIRECT_ACTION
+    implementation: EXISTING_JEV_OUTPUT
+    tags: [baseline, direct]
+
+  - case_id: jev-confidence-entry
+    name: Jev direction with a confidence entry gate
+    description: Use a direction answer only when its confidence reaches the declared threshold.
+    input_profile: MICROSTRUCTURE
+    prediction_target: DIRECTION_5M
+    decision_use: ENTRY_GATE
+    output_policy:
+      kind: CONFIDENCE_THRESHOLD
+      thresholds:
+        min_confidence: "0.60"
+    implementation: OUTPUT_POLICY_ADAPTER
+    tags: [entry, confidence]
+
+  - case_id: jev-margin-entry
+    name: Jev direction with a top-two probability margin
+    description: Accept a direction only when the leading probability separates from the runner-up.
+    input_profile: MICROSTRUCTURE
+    prediction_target: DIRECTION_5M
+    decision_use: ENTRY_GATE
+    output_policy:
+      kind: TOP_TWO_MARGIN
+      thresholds:
+        min_top_two_margin: "0.20"
+    implementation: OUTPUT_POLICY_ADAPTER
+    tags: [entry, probability-margin]
+
+  - case_id: jev-quality-entry
+    name: Jev setup quality as an entry gate
+    description: Accept an existing candidate only when Jev rates setup quality above the threshold.
+    input_profile: MICROSTRUCTURE
+    prediction_target: SETUP_QUALITY
+    decision_use: ENTRY_GATE
+    output_policy:
+      kind: SETUP_QUALITY_GATE
+      thresholds:
+        min_setup_quality: "0.60"
+    implementation: OUTPUT_POLICY_ADAPTER
+    tags: [entry, setup-quality]
+
+  - case_id: jev-ml-input
+    name: ML prediction supplied as Jev context
+    description: Add the point-in-time ML prediction to the same market context and compare the gate.
+    input_profile: ML_AWARE
+    prediction_target: DIRECTION_5M
+    decision_use: ENTRY_GATE
+    output_policy:
+      kind: CONFIDENCE_THRESHOLD
+      thresholds:
+        min_confidence: "0.60"
+    implementation: OUTPUT_POLICY_ADAPTER
+    tags: [entry, ml-input]
+
+  - case_id: jev-temporal-confirmation
+    name: Consecutive Jev confirmation before entry
+    description: Require two consecutive accepted Jev decisions before opening a position.
+    input_profile: MICROSTRUCTURE
+    prediction_target: ACTION_NEXT_INTERVAL
+    decision_use: ENTRY_GATE
+    output_policy:
+      kind: TEMPORAL_CONFIRMATION
+      thresholds:
+        required_consecutive_decisions: 2
+    implementation: OUTPUT_POLICY_ADAPTER
+    tags: [entry, temporal]
+
+  - case_id: jev-exit-thesis
+    name: Jev thesis check for an open position
+    description: Ask whether the holding thesis remains valid before keeping the position open.
+    input_profile: PORTFOLIO_AWARE
+    prediction_target: EXIT_THESIS_5M
+    decision_use: EXIT_OVERRIDE
+    output_policy:
+      kind: DIRECT_ACTION
+    implementation: CUSTOM_QUESTION_SET
+    question_set_version: jev-exit-v1
+    tags: [exit, position-state]
+
+  - case_id: jev-barrier-entry
+    name: Jev take-profit versus stop-loss outcome
+    description: Ask which barrier is reached first within the holding horizon before entering.
+    input_profile: MICROSTRUCTURE
+    prediction_target: BARRIER_OUTCOME_5M
+    decision_use: ENTRY_GATE
+    output_policy:
+      kind: CONFIDENCE_THRESHOLD
+      thresholds:
+        min_confidence: "0.60"
+    implementation: CUSTOM_QUESTION_SET
+    question_set_version: jev-barrier-v1
+    tags: [entry, barrier]
+
+  - case_id: jev-entry-exit-split
+    name: Separate Jev policies for entry and exit
+    description: Use Jev for entry acceptance and a distinct Jev output policy for exit decisions.
+    input_profile: PORTFOLIO_AWARE
+    prediction_target: DIRECTION_5M
+    decision_use: ENTRY_GATE
+    output_policy:
+      kind: ENTRY_EXIT_SPLIT
+      thresholds:
+        min_confidence: "0.60"
+    implementation: OUTPUT_POLICY_ADAPTER
+    tags: [entry, exit, position-state]

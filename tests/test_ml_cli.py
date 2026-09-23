@@ -130,7 +130,7 @@ async def test_jquants_source_fetches_minute_bars_before_training(
         del request, timeout
         return BytesIO(json.dumps({"data": rows}).encode("utf-8"))
 
-    monkeypatch.setattr("trader_jev.jquants.urlopen", fake_urlopen)
+    monkeypatch.setattr("trader_jev.jquants.safe_urlopen", fake_urlopen)
     env_file = tmp_path / ".env"
     env_file.write_text(
         "JQUANTS_API_KEY=test-secret\nJQUANTS_REQUESTS_PER_MINUTE=600\n",

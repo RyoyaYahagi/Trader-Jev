@@ -16,12 +16,13 @@ from time import monotonic, sleep
 from typing import Any, cast
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlencode, urlsplit
-from urllib.request import Request, urlopen
+from urllib.request import Request
 from uuid import NAMESPACE_URL, uuid5
 from zoneinfo import ZoneInfo
 
 from pydantic import Field, SecretStr, field_validator
 
+from trader_jev.http_security import safe_urlopen
 from trader_jev.interfaces import HistoricalDataAdapter, MarketDataAdapter
 from trader_jev.models import BarEvent, DomainModel, InstrumentMetadata, MarketEvent
 
@@ -209,7 +210,7 @@ class JQuantsMinuteBarAdapter(MarketDataAdapter, HistoricalDataAdapter):
         for attempt in range(self.config.max_retries + 1):
             self._wait_for_rate_limit()
             try:
-                with urlopen(request, timeout=self.config.timeout_seconds) as response:
+                with safe_urlopen(request, timeout=self.config.timeout_seconds) as response:
                     body = response.read(self.config.max_response_bytes + 1)
                 if len(body) > self.config.max_response_bytes:
                     raise JQuantsApiError("J-Quants response exceeded the configured size limit")

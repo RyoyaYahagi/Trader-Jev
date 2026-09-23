@@ -16,11 +16,12 @@ from time import monotonic
 from typing import Any, cast
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlsplit
-from urllib.request import Request, urlopen
+from urllib.request import Request
 
 from pydantic import Field, SecretStr, field_validator, model_validator
 
 from trader_jev.decision import JevDecision, JevRequest
+from trader_jev.http_security import safe_urlopen
 from trader_jev.models import DomainModel
 
 DEFAULT_JEV_GATEWAY_URL = "http://127.0.0.1:4789/v1/systemone"
@@ -205,7 +206,7 @@ class JevHttpClient:
             method="POST",
         )
         try:
-            with urlopen(request, timeout=self.config.timeout_seconds) as response:
+            with safe_urlopen(request, timeout=self.config.timeout_seconds) as response:
                 encoded_response = response.read(self.config.max_response_bytes + 1)
                 if len(encoded_response) > self.config.max_response_bytes:
                     raise JevHttpError("Jev response exceeded the configured size limit")

@@ -153,7 +153,7 @@ async def test_client_posts_typed_request_with_secret_in_header_only(
             ).encode("utf-8")
         )
 
-    monkeypatch.setattr("trader_jev.jev_http.urlopen", fake_urlopen)
+    monkeypatch.setattr("trader_jev.jev_http.safe_urlopen", fake_urlopen)
     client = JevHttpClient.from_env(
         {
             "JEV_API_KEY": "secret-value",
@@ -192,7 +192,7 @@ async def test_response_size_limit_is_enforced(monkeypatch: pytest.MonkeyPatch) 
         del request, timeout
         return FakeResponse(b'{"action":"HOLD"}')
 
-    monkeypatch.setattr("trader_jev.jev_http.urlopen", fake_urlopen)
+    monkeypatch.setattr("trader_jev.jev_http.safe_urlopen", fake_urlopen)
     client = JevHttpClient(
         JevHttpClientConfig(
             base_url="https://jev.example",
@@ -214,7 +214,7 @@ async def test_client_rejects_response_without_typed_answers(
         del request, timeout
         return FakeResponse(b'{"model":"jev-1.13.0"}')
 
-    monkeypatch.setattr("trader_jev.jev_http.urlopen", fake_urlopen)
+    monkeypatch.setattr("trader_jev.jev_http.safe_urlopen", fake_urlopen)
     client = JevHttpClient(
         JevHttpClientConfig(
             base_url="https://jev.example",

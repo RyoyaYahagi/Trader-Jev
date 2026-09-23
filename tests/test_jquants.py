@@ -85,7 +85,7 @@ def test_jquants_minute_adapter_paginates_and_normalizes_bars(
         requests.append(request)
         return FakeResponse(responses[len(requests) - 1])
 
-    monkeypatch.setattr("trader_jev.jquants.urlopen", fake_urlopen)
+    monkeypatch.setattr("trader_jev.jquants.safe_urlopen", fake_urlopen)
     adapter = JQuantsMinuteBarAdapter(
         JQuantsClientConfig(
             api_key=SecretStr("test-secret"),
@@ -132,7 +132,7 @@ def test_jquants_adapter_does_not_include_api_key_in_http_error(
             BytesIO(b"request contained test-secret"),
         )
 
-    monkeypatch.setattr("trader_jev.jquants.urlopen", failing_urlopen)
+    monkeypatch.setattr("trader_jev.jquants.safe_urlopen", failing_urlopen)
     adapter = JQuantsMinuteBarAdapter(
         JQuantsClientConfig(
             api_key=SecretStr("test-secret"), requests_per_minute=600, max_retries=0

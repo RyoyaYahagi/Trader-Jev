@@ -10,9 +10,11 @@ import pytest
 
 from trader_jev.decision import JevDecision
 from trader_jev.experiments import (
+    AdaptiveReview,
     DecisionUse,
     EvaluationSplit,
     EvaluationSplitKind,
+    ExperimentAdaptivePolicy,
     ExperimentCandidate,
     ExperimentCase,
     ExperimentContext,
@@ -22,6 +24,7 @@ from trader_jev.experiments import (
     ExperimentPlan,
     ExperimentRegistry,
     ExperimentRegistryError,
+    ExperimentSchedulePhase,
     JevInputProfile,
     JevOutputPolicy,
     JevPredictionTarget,
@@ -359,7 +362,7 @@ def test_forward_paper_plan_records_initial_candidates_and_budget() -> None:
     plan_path = Path(__file__).parents[1] / "configs" / "jev-forward-paper-plan.yaml"
     plan = ExperimentPlan.from_yaml(plan_path)
 
-    assert plan.plan_id == "jev-forward-paper-v3-prioritized"
+    assert plan.plan_id == "jev-forward-paper-v4-adaptive"
     assert plan.operations.daily_run_limit == 2
     assert plan.operations.max_concurrent_runs == 2
     assert len(plan.candidates) == 7
@@ -448,7 +451,7 @@ def test_unscheduled_plan_document_preserves_legacy_hash() -> None:
     import json
 
     plan = _plan()
-    legacy = plan.model_dump(mode="json", exclude={"schedule"})
+    legacy = plan.model_dump(mode="json", exclude={"schedule", "adaptive"})
     assert plan.document() == legacy
     assert (
         plan.plan_hash
@@ -456,3 +459,117 @@ def test_unscheduled_plan_document_preserves_legacy_hash() -> None:
             json.dumps(legacy, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode()
         ).hexdigest()
     )
+
+
+def test_adaptive_review_records_phase_and_adds_validation_replicates() -> None:
+    plan = ExperimentPlan.from_yaml(
+        Path(__file__).parents[1] / "configs" / "jev-forward-paper-plan.yaml"
+    )
+    assert plan.adaptive.enabled
+    assert plan.adaptive.minimum_replicates == 5
+    assert plan.adaptive.validation_replicates == 10
+
+    with ExperimentRegistry(":memory:") as registry:
+        registry.register_plan(plan)
+        screening_runs = plan.runs()[:10]
+        for index, expected in enumerate(screening_runs):
+            lease = registry.claim_next(
+                worker_id=f"screen-{index}",
+                plan_id=plan.plan_id,
+                max_concurrent_runs=1,
+                daily_run_limit=100,
+            )
+            assert lease is not None
+            assert lease.run.run_id == expected.run_id
+            registry.succeed(
+                lease,
+                metrics=(
+                    ExperimentMetric(
+                        name="net_pnl",
+                        value=Decimal("10") if index >= 5 else Decimal("1"),
+                    ),
+                    ExperimentMetric(name="trade_count", value=Decimal("4")),
+                ),
+            )
+
+        review = registry.review_adaptive_plan(plan)
+
+        assert isinstance(review, AdaptiveReview)
+        assert review.phase == "P0-baseline"
+        assert review.selected_group_keys
+        assert len(review.created_run_ids) == 10
+        follow_up = registry.get_run(review.created_run_ids[0])
+        assert follow_up is not None
+        assert follow_up.replicate == 6
+        assert follow_up.config["adaptive"]["source_phase"] == "P0-baseline"
+
+        second_review = registry.review_adaptive_plan(plan)
+        assert second_review is None
+
+        next_lease = registry.claim_next(
+            worker_id="validation",
+            plan_id=plan.plan_id,
+            max_concurrent_runs=1,
+            daily_run_limit=100,
+        )
+        assert next_lease is not None
+        assert next_lease.run.run_id in review.created_run_ids
+
+
+def test_adaptive_review_keeps_unselected_groups_at_screening_only() -> None:
+    plan = ExperimentPlan(
+        plan_id="adaptive-selection-test",
+        name="Adaptive selection test",
+        purpose="Verify that only the selected group receives extra repetitions.",
+        cases=(_case("a"), _case("b")),
+        splits=(
+            EvaluationSplit(
+                split_id="paper",
+                kind=EvaluationSplitKind.FORWARD_PAPER,
+                data_id="fixture-paper",
+            ),
+        ),
+        candidates=(ExperimentCandidate(candidate_id="candidate"),),
+        replicates=2,
+        adaptive=ExperimentAdaptivePolicy(
+            enabled=True,
+            minimum_replicates=2,
+            validation_replicates=3,
+            top_groups=1,
+        ),
+        schedule=(
+            ExperimentSchedulePhase(
+                phase="P0",
+                candidate_ids=("candidate",),
+                case_groups=(("a",), ("b",)),
+            ),
+        ),
+    )
+    with ExperimentRegistry(":memory:") as registry:
+        registry.register_plan(plan)
+        for index, expected in enumerate(plan.runs()):
+            lease = registry.claim_next(
+                worker_id=f"screen-{index}",
+                plan_id=plan.plan_id,
+                max_concurrent_runs=1,
+                daily_run_limit=100,
+            )
+            assert lease is not None and lease.run.run_id == expected.run_id
+            value = Decimal("10") if expected.case_id == "a" else Decimal("1")
+            registry.succeed(
+                lease,
+                metrics=(ExperimentMetric(name="net_pnl", value=value),),
+            )
+
+        group_keys = {
+            run.case_id: run.config["schedule"]["comparison_group_key"]
+            for run in plan.runs()
+            if run.config["schedule"]["phase"] == "P0"
+        }
+        review = registry.review_adaptive_plan(plan)
+        assert review is not None
+        assert review.selected_group_keys == (group_keys["a"],)
+        assert len(review.created_run_ids) == 1
+        assert all("g" in run_id and "__a__r03" in run_id for run_id in review.created_run_ids)
+        adaptations = registry.adaptations(plan_id=plan.plan_id)
+        assert [entry["phase"] for entry in adaptations] == ["P0"]

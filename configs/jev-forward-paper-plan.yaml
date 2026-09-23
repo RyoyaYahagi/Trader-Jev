@@ -1,8 +1,14 @@
 schema_version: "1"
-plan_id: jev-forward-paper-v3-prioritized
+plan_id: jev-forward-paper-v4-adaptive
 name: Autonomous Jev Forward Paper
 purpose: Accumulate independent Paper trading sessions for Jev entry policies using technical-only and microstructure inputs; news and ML are not active in this plan.
 replicates: 5
+adaptive:
+  enabled: true
+  minimum_replicates: 5
+  validation_replicates: 10
+  top_groups: 2
+  metric_name: net_pnl
 # Phase order, then replicate, candidate, case group, and group member.
 schedule:
   - phase: P0-baseline

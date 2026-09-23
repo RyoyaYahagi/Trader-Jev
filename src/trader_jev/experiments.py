@@ -18,7 +18,7 @@ from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 from enum import StrEnum
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from pydantic import Field, model_validator
@@ -497,6 +497,22 @@ class ExperimentSchedulePhase(DomainModel):
     case_groups: tuple[tuple[str, ...], ...] = Field(min_length=1)
 
 
+class ExperimentAdaptivePolicy(DomainModel):
+    """Rules for selecting extra validation repetitions after screening."""
+
+    enabled: bool = False
+    minimum_replicates: int = Field(default=5, ge=1)
+    validation_replicates: int = Field(default=10, ge=1)
+    top_groups: int = Field(default=2, ge=1)
+    metric_name: str = Field(default="net_pnl", min_length=1)
+
+    @model_validator(mode="after")
+    def validate_replicate_range(self) -> ExperimentAdaptivePolicy:
+        if self.validation_replicates < self.minimum_replicates:
+            raise ValueError("validation_replicates must be >= minimum_replicates")
+        return self
+
+
 class ExperimentPlan(DomainModel):
     """Versioned catalog that expands into every planned run."""
 
@@ -514,6 +530,7 @@ class ExperimentPlan(DomainModel):
     )
     schema_version: str = Field(default="1", min_length=1)
     schedule: tuple[ExperimentSchedulePhase, ...] = ()
+    adaptive: ExperimentAdaptivePolicy = Field(default_factory=ExperimentAdaptivePolicy)
 
     @model_validator(mode="after")
     def validate_unique_ids(self) -> ExperimentPlan:
@@ -530,6 +547,8 @@ class ExperimentPlan(DomainModel):
             raise ValueError("at least one experiment case must be enabled")
         if not any(candidate.enabled for candidate in self.candidates):
             raise ValueError("at least one experiment candidate must be enabled")
+        if self.adaptive.enabled and self.adaptive.validation_replicates <= self.replicates:
+            raise ValueError("adaptive validation_replicates must be greater than plan replicates")
         if self.schedule:
             expected = {
                 (case.case_id, candidate.candidate_id)
@@ -585,6 +604,8 @@ class ExperimentPlan(DomainModel):
         document = self.model_dump(mode="json")
         if not self.schedule:
             document.pop("schedule")
+        if not self.adaptive.enabled and self.adaptive == ExperimentAdaptivePolicy():
+            document.pop("adaptive")
         return document
 
     def runs(self) -> tuple[ExperimentRunSpec, ...]:
@@ -644,6 +665,10 @@ class ExperimentPlan(DomainModel):
                                 f"{self.plan_id}__{phase.phase}__{split.split_id}"
                                 f"__r{replicate:02d}__{candidate_id}__g{group_index}"
                             )
+                            comparison_group_key = (
+                                f"{self.plan_id}__{phase.phase}__{split.split_id}"
+                                f"__{candidate_id}__g{group_index}"
+                            )
                             for case_id in group:
                                 run = by_key[(split.split_id, case_id, candidate_id, replicate)]
                                 config = dict(run.config)
@@ -651,6 +676,7 @@ class ExperimentPlan(DomainModel):
                                     "rank": len(ordered) + 1,
                                     "phase": phase.phase,
                                     "comparison_group": comparison_group,
+                                    "comparison_group_key": comparison_group_key,
                                 }
                                 ordered.append(
                                     run.model_copy(
@@ -732,6 +758,16 @@ class ExperimentResult(DomainModel):
 
     run: ExperimentRunRecord
     metrics: tuple[ExperimentMetric, ...] = ()
+
+
+class AdaptiveReview(DomainModel):
+    """One immutable phase review and its automatically added validations."""
+
+    plan_id: str
+    phase: str
+    selected_group_keys: tuple[str, ...] = ()
+    created_run_ids: tuple[str, ...] = ()
+    reason: str = Field(min_length=1)
 
 
 class ExperimentRegistry:
@@ -1352,6 +1388,245 @@ class ExperimentRegistry:
         runs = self.list_runs(plan_id=plan_id, status=RunStatus.SUCCEEDED)
         return tuple(ExperimentResult(run=run, metrics=self.metrics(run.run_id)) for run in runs)
 
+    def review_adaptive_plan(self, plan: ExperimentPlan) -> AdaptiveReview | None:
+        """Review one completed screening phase and add top-group validations.
+
+        The plan remains immutable. Validation rows are runtime-generated and
+        recorded as an adaptation, so a worker can safely resume the review
+        after a process restart without adding duplicate runs.
+        """
+
+        if not plan.adaptive.enabled or not plan.schedule:
+            return None
+        terminal = {
+            RunStatus.SUCCEEDED.value,
+            RunStatus.FAILED.value,
+            RunStatus.SKIPPED.value,
+            RunStatus.INVALIDATED.value,
+        }
+        with self._transaction() as connection:
+            rows = connection.execute(
+                "SELECT * FROM experiment_runs WHERE plan_id = ?",
+                (plan.plan_id,),
+            ).fetchall()
+            for phase_index, phase in enumerate(plan.schedule):
+                phase_rows = [
+                    row
+                    for row in rows
+                    if _run_schedule_value(row, "phase") == phase.phase
+                    and _run_schedule_value(row, "adaptive") is None
+                ]
+                if not phase_rows:
+                    continue
+                if any(str(row["status"]) not in terminal for row in phase_rows):
+                    return None
+                already_reviewed = connection.execute(
+                    """
+                    SELECT 1 FROM experiment_adaptations
+                    WHERE plan_id = ? AND phase = ?
+                    """,
+                    (plan.plan_id, phase.phase),
+                ).fetchone()
+                if already_reviewed is not None:
+                    continue
+
+                groups: dict[str, list[sqlite3.Row]] = {}
+                for row in phase_rows:
+                    key = _run_schedule_value(row, "comparison_group_key")
+                    if key is None:
+                        key = str(row["run_id"])
+                    groups.setdefault(key, []).append(row)
+                scored: list[tuple[str, Decimal, list[sqlite3.Row]]] = []
+                for group_key, group_rows in groups.items():
+                    values: list[Decimal] = []
+                    successful_by_case: dict[str, int] = {}
+                    for row in group_rows:
+                        if str(row["status"]) != RunStatus.SUCCEEDED.value:
+                            continue
+                        metric = self._metric_value_for_row(
+                            connection,
+                            row,
+                            name=plan.adaptive.metric_name,
+                        )
+                        if metric is not None:
+                            values.append(metric)
+                            case_id = str(row["case_id"])
+                            successful_by_case[case_id] = successful_by_case.get(case_id, 0) + 1
+                    case_ids = {str(row["case_id"]) for row in group_rows}
+                    if not values or any(
+                        successful_by_case.get(case_id, 0) < plan.adaptive.minimum_replicates
+                        for case_id in case_ids
+                    ):
+                        continue
+                    scored.append((group_key, sum(values, Decimal("0")) / len(values), group_rows))
+
+                selected = sorted(scored, key=lambda item: (-item[1], item[0]))[
+                    : plan.adaptive.top_groups
+                ]
+                next_rank = self._next_schedule_rank(
+                    rows,
+                    plan,
+                    phase_index=phase_index,
+                )
+                validation_rank = (
+                    next_rank - 0.5
+                    if next_rank is not None
+                    else self._max_schedule_rank(rows) + 0.5
+                )
+                created_run_ids: list[str] = []
+                source_run_ids = [str(row["run_id"]) for _, _, group in selected for row in group]
+                for group_key, _, group_rows in selected:
+                    by_case: dict[str, sqlite3.Row] = {}
+                    for row in sorted(group_rows, key=lambda value: int(value["replicate"])):
+                        by_case.setdefault(str(row["case_id"]), row)
+                    for replicate in range(
+                        max(plan.replicates, plan.adaptive.minimum_replicates) + 1,
+                        plan.adaptive.validation_replicates + 1,
+                    ):
+                        for case_id, source in sorted(by_case.items()):
+                            source_config = json.loads(str(source["config_json"]))
+                            config = dict(source_config)
+                            config["replicate"] = replicate
+                            config["adaptive"] = {
+                                "source_phase": phase.phase,
+                                "source_group_key": group_key,
+                                "generation": 1,
+                            }
+                            schedule = dict(config.get("schedule", {}))
+                            schedule["rank"] = validation_rank
+                            schedule["phase"] = f"{phase.phase}-validation"
+                            schedule["comparison_group"] = f"{group_key}__adaptive-r{replicate:02d}"
+                            schedule["comparison_group_key"] = f"{group_key}__adaptive"
+                            config["schedule"] = schedule
+                            group_token = _sha256_text(group_key)[:12]
+                            run_id = (
+                                f"{plan.plan_id}__adaptive__{phase.phase}__"
+                                f"g{group_token}__{case_id}__r{replicate:02d}"
+                            )
+                            config_hash = _hash_json(config)
+                            connection.execute(
+                                """
+                                INSERT INTO experiment_runs
+                                    (run_id, plan_id, case_id, split_id, split_kind, replicate,
+                                     config_hash, config_json, status, created_at, updated_at)
+                                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                                """,
+                                (
+                                    run_id,
+                                    plan.plan_id,
+                                    case_id,
+                                    str(source["split_id"]),
+                                    str(source["split_kind"]),
+                                    replicate,
+                                    config_hash,
+                                    _canonical_json(config),
+                                    RunStatus.PLANNED.value,
+                                    _now_text(),
+                                    _now_text(),
+                                ),
+                            )
+                            created_run_ids.append(run_id)
+                reason = (
+                    f"selected {len(selected)} group(s) by mean "
+                    f"{plan.adaptive.metric_name} after "
+                    f"{plan.adaptive.minimum_replicates} screening replicate(s)"
+                )
+                connection.execute(
+                    """
+                    INSERT INTO experiment_adaptations
+                        (plan_id, phase, action, reason, source_run_ids_json,
+                         created_run_ids_json, created_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        plan.plan_id,
+                        phase.phase,
+                        "VALIDATE_TOP_GROUPS",
+                        reason,
+                        _canonical_json(source_run_ids),
+                        _canonical_json(created_run_ids),
+                        _now_text(),
+                    ),
+                )
+                return AdaptiveReview(
+                    plan_id=plan.plan_id,
+                    phase=phase.phase,
+                    selected_group_keys=tuple(item[0] for item in selected),
+                    created_run_ids=tuple(created_run_ids),
+                    reason=reason,
+                )
+        return None
+
+    def adaptations(self, *, plan_id: str) -> tuple[Mapping[str, Any], ...]:
+        """Return persisted adaptive review decisions for one plan."""
+
+        with self._lock:
+            rows = self._connection.execute(
+                """
+                SELECT adaptation_id, plan_id, phase, action, reason,
+                       source_run_ids_json, created_run_ids_json, created_at
+                FROM experiment_adaptations
+                WHERE plan_id = ? ORDER BY adaptation_id
+                """,
+                (plan_id,),
+            ).fetchall()
+        return tuple(
+            {
+                "adaptation_id": int(row["adaptation_id"]),
+                "plan_id": str(row["plan_id"]),
+                "phase": str(row["phase"]),
+                "action": str(row["action"]),
+                "reason": str(row["reason"]),
+                "source_run_ids": json.loads(str(row["source_run_ids_json"])),
+                "created_run_ids": json.loads(str(row["created_run_ids_json"])),
+                "created_at": str(row["created_at"]),
+            }
+            for row in rows
+        )
+
+    @staticmethod
+    def _metric_value_for_row(
+        connection: sqlite3.Connection,
+        row: sqlite3.Row,
+        *,
+        name: str,
+    ) -> Decimal | None:
+        attempt_id = row["attempt_id"]
+        if attempt_id is None:
+            return None
+        metric = connection.execute(
+            """
+            SELECT metric_value FROM experiment_metrics
+            WHERE run_id = ? AND attempt_id = ? AND metric_name = ?
+            LIMIT 1
+            """,
+            (str(row["run_id"]), int(attempt_id), name),
+        ).fetchone()
+        return None if metric is None else Decimal(str(metric["metric_value"]))
+
+    @staticmethod
+    def _max_schedule_rank(rows: Sequence[sqlite3.Row]) -> float:
+        ranks = [
+            float(value) for row in rows if (value := _run_schedule_value(row, "rank")) is not None
+        ]
+        return max(ranks, default=0.0)
+
+    @staticmethod
+    def _next_schedule_rank(
+        rows: Sequence[sqlite3.Row],
+        plan: ExperimentPlan,
+        *,
+        phase_index: int,
+    ) -> float | None:
+        later_phases = {phase.phase for phase in plan.schedule[phase_index + 1 :]}
+        ranks = [
+            float(value)
+            for row in rows
+            if _run_schedule_value(row, "phase") in later_phases
+            and (value := _run_schedule_value(row, "rank")) is not None
+        ]
+        return min(ranks) if ranks else None
+
     def attempts(self, run_id: str) -> tuple[Mapping[str, Any], ...]:
         """Return immutable attempt metadata for audit and retry analysis."""
 
@@ -1568,6 +1843,17 @@ class ExperimentRegistry:
                     sha256 TEXT NOT NULL,
                     created_at TEXT NOT NULL
                 );
+                CREATE TABLE IF NOT EXISTS experiment_adaptations (
+                    adaptation_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    plan_id TEXT NOT NULL REFERENCES experiment_plans(plan_id),
+                    phase TEXT NOT NULL,
+                    action TEXT NOT NULL,
+                    reason TEXT NOT NULL,
+                    source_run_ids_json TEXT NOT NULL,
+                    created_run_ids_json TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    UNIQUE(plan_id, phase)
+                );
                 """
             )
 
@@ -1609,6 +1895,21 @@ class ExperimentRegistry:
         )
 
 
+def _run_schedule_value(row: sqlite3.Row, key: str) -> Any:
+    """Read one schedule/adaptation value from a stored run config."""
+
+    raw_config = json.loads(str(row["config_json"]))
+    if not isinstance(raw_config, Mapping):
+        return None
+    config = cast(Mapping[str, Any], raw_config)
+    if key == "adaptive":
+        return config.get("adaptive")
+    schedule = config.get("schedule")
+    if not isinstance(schedule, Mapping):
+        return None
+    return cast(Mapping[str, Any], schedule).get(key)
+
+
 def artifact_for_file(path: str | Path, *, artifact_type: str) -> ExperimentArtifact:
     """Create an artifact record with a content hash without copying the file."""
 
@@ -1626,7 +1927,7 @@ def sha256_for_file(path: str | Path) -> str:
     return hashlib.sha256(Path(path).read_bytes()).hexdigest()
 
 
-def _canonical_json(value: Mapping[str, Any]) -> str:
+def _canonical_json(value: Any) -> str:
     return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
 
 
@@ -1667,6 +1968,7 @@ __all__ = [
     "DecisionUse",
     "EvaluationSplit",
     "EvaluationSplitKind",
+    "ExperimentAdaptivePolicy",
     "ExperimentContext",
     "ExperimentArtifact",
     "ExperimentCase",
@@ -1683,6 +1985,7 @@ __all__ = [
     "ExperimentRunRecord",
     "ExperimentRunSpec",
     "ExperimentRunMode",
+    "AdaptiveReview",
     "JevInputProfile",
     "JevOutputPolicy",
     "JevPredictionTarget",

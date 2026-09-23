@@ -91,9 +91,9 @@
 
 ## 自律Forward Paperの運用
 
-`jev-forward-paper-v3-prioritized` は、2つの入力プロファイル × 3つの方向ゲートケース × 5つの有効candidate × 5反復、合計150 runを登録します。入力プロファイルと閾値の全組み合わせを同じ運用候補で比較します。15分・30分予測の2候補は質問セット未対応のため無効候補として計画に残し、runへは展開しません。
+`jev-forward-paper-v4-adaptive` は、2つの入力プロファイル × 3つの方向ゲートケース × 5つの有効candidate × 5反復、合計150 runを初期スクリーニングとして登録します。入力プロファイルと閾値の全組み合わせを同じ運用候補で比較します。15分・30分予測の2候補は質問セット未対応のため無効候補として計画に残し、runへは展開しません。
 
-優先順位を設定したため、v1・v2とは別の `plan_id` を使用します。既存の計画と履歴は保持します。新しい計画を登録し、workerの `--plan-id` をv3へ切り替えます。旧計画のworkerの停止や稼働中の実験の扱いは、運用時に確認してください。
+優先順位と適応探索を追加したため、v1〜v3とは別の `plan_id` を使用します。既存の計画と履歴は保持します。新しい計画を登録し、workerの `--plan-id` をv4へ切り替えます。旧計画のworkerの停止や稼働中の実験の扱いは、運用時に確認してください。
 
 優先順位は以下のとおりです。順位は実行開始の順序を表し、成功件数や性能による段階移行の判定ではありません。
 
@@ -105,9 +105,20 @@
 
 150 runそれぞれの順位は [実行順一覧CSV](jev-forward-paper-run-order.csv) に記載します。`nominal_trading_day` は1日2 runを中断なく開始した場合の取引日番号です。実際の日付や完了予定日ではありません。実行順の正本はYAMLの `schedule` です。
 
+### 結果に応じた自動適応
+
+初期150 runの順位は固定ですが、workerは各段階の全screening runが終端状態になった時点で自動レビューします。レビュー条件と動作はYAMLの `adaptive` に保存します。
+
+- 同じ `comparison_group_key` の成功runについて `net_pnl` の平均を計算します。各caseに最低5成功反復がないグループは選抜対象にしません。
+- 平均損益の上位2グループだけに、反復6〜10を追加登録します。追加runには元の段階・グループ・世代を記録します。
+- 選抜されなかったグループには追加反復を登録しません。初期150のscreening行を途中で削除・取消しするわけではないため、比較の網羅性は保ちます。ここでの「悪い候補を停止」は、追加検証への配分を停止する意味です。
+- P0、P1、P2のレビュー結果と追加runのIDはSQLiteの `experiment_adaptations` に保存します。workerを再起動しても同じ段階を二重レビューしません。
+
+したがって、P0のscreeningが完了するとworkerがレビューと追加反復の登録を行い、キュー順に従って次の段階へ進みます。追加反復を含むruntime生成runは、初期150行を示すCSVには含めず、SQLiteを正本とします。現在の5反復・上位2グループ・10反復という値は初期運用値であり、結果を見て次の `plan_id` で変更します。
+
 各段階では反復番号を先に進めます。例えばP1は、0.60/0.20の2入力、0.70/0.10の2入力を実行してから2反復目へ進みます。P2は60秒間隔、15秒間隔、最大保有30分、損切り1.5 ATRの順に各3閾値を試し、24 runを一巡してから次の反復へ進みます。判断頻度の比較を先に行い、その後に出口条件を比較するための固定順序です。
 
-YAMLの `schedule` に段階、運用候補の順番、比較するケースの組を指定します。有効なケースと運用候補の組み合わせに漏れ・重複があれば登録前にエラーにします。各runのSQLite設定には `schedule.rank`（全体順位）、`schedule.phase`（段階）、`schedule.comparison_group`（比較する組の識別子）を保存し、設定ハッシュにも含めます。一覧と取得は順位に従います。優先順位を指定しない既存計画は従来の順序とハッシュを維持します。
+YAMLの `schedule` に段階、運用候補の順番、比較するケースの組を指定します。有効なケースと運用候補の組み合わせに漏れ・重複があれば登録前にエラーにします。各runのSQLite設定には `schedule.rank`（全体順位）、`schedule.phase`（段階）、`schedule.comparison_group`（反復を含む比較runの識別子）、`schedule.comparison_group_key`（反復をまたいだ集計単位）を保存し、設定ハッシュにも含めます。一覧と取得は順位に従います。優先順位を指定しない既存計画は従来の順序とハッシュを維持します。
 
 同条件のテクニカルのみ／板・約定・需給付きは隣り合う順位です。同時実行枠が2件空いている通常の実行では続けて開始されますが、組単位の原子的な取得や開始同期は行いません。障害・再試行・複数workerによって実行時刻がずれることがあるため、比較時には実際の稼働期間を照合します。段階間では実施日が異なり、市場環境の差も結果に含まれます。
 
@@ -123,6 +134,8 @@ YAMLの `schedule` に段階、運用候補の順番、比較するケースの�
 
 日次上限は `started_at` がその予算日に初めて設定されたrun行を数えます。再試行は同じrun行のattempt追加なので新規枠を消費しません。150 runを一巡する最短目安は、失敗・休場を除き75取引日です。この日数は実行件数から求めた下限であり、統計的な十分性や過学習の抑制を保証しません。
 
+実行前に、[moomoo OpenD設定](MOOMOO.md)を起動し、[Jev Gatewayまたは直接API設定](JEV_HTTP.md)を用意します。`.env` はworkerの `--env-file`（既定 `.env`）から読み込まれ、`MOOMOO_OPEND_*`、`JEV_*`、`TYPESAFE_API_KEY`をプロセスへ渡します。`uv sync`後は `trader-jev-experiment-worker` がconsole scriptとして利用できます。OpenDは読み取り専用quote、JevはGatewayまたはAPIキー経由で使用し、実注文・口座APIは呼び出しません。
+
 登録と自動実行:
 
 ```bash
@@ -132,16 +145,24 @@ uv run trader-jev-experiment register \
 
 uv run trader-jev-experiment budget \
   --db var/experiments.sqlite \
-  --plan-id jev-forward-paper-v3-prioritized
+  --plan-id jev-forward-paper-v4-adaptive
 
 uv run trader-jev-experiment-worker \
   --db var/experiments.sqlite \
-  --plan-id jev-forward-paper-v3-prioritized \
+  --plan-id jev-forward-paper-v4-adaptive \
   --worker-id paper-01 \
   --env-file .env \
   --report-dir var/paper-experiments \
   --until-nasdaq-close \
   --watch
+```
+
+適応レビューの履歴は次で確認できます。
+
+```bash
+uv run trader-jev-experiment adaptations \
+  --db var/experiments.sqlite \
+  --plan-id jev-forward-paper-v4-adaptive
 ```
 
 workerは実注文を送らず、読み取り専用のmoomoo quoteを`MoomooMarketDataAdapter`で取得し、各独立runの注文を`PaperBroker`へ送ります。完了時には `forward-paper-summary` と `jev-calls` のartifactをSHA-256付きでSQLiteへ登録します。後者はJev request、正規化済みdecision、成功／失敗auditを1呼び出し1行で保持します。

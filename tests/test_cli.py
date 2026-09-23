@@ -58,7 +58,8 @@ def test_env_file_does_not_override_process_environment(
     env_file = tmp_path / ".env"
     env_file.write_text(
         "JEV_GATEWAY_URL=\nJEV_API_KEY=file-key\nTYPESAFE_API_KEY=typesafe-file-key\n"
-        "JEV_BASE_URL=https://file.example\nJQUANTS_API_KEY=jquants-file-key\n",
+        "JEV_BASE_URL=https://file.example\nJQUANTS_API_KEY=jquants-file-key\n"
+        "MOOMOO_OPEND_HOST=opend.example\nMOOMOO_OPEND_PORT=12345\n",
         encoding="utf-8",
     )
     monkeypatch.setenv("JEV_API_KEY", "process-key")
@@ -69,6 +70,8 @@ def test_env_file_does_not_override_process_environment(
     assert values["TYPESAFE_API_KEY"] == "typesafe-file-key"
     assert values["JEV_BASE_URL"] == "https://file.example"
     assert values["JQUANTS_API_KEY"] == "jquants-file-key"
+    assert values["MOOMOO_OPEND_HOST"] == "opend.example"
+    assert values["MOOMOO_OPEND_PORT"] == "12345"
 
 
 def test_env_file_drops_upstream_keys_when_gateway_is_enabled(

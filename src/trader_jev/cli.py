@@ -490,7 +490,7 @@ def load_env_file(path: Path) -> dict[str, str]:
                 raise ValueError(f"env file line {line_number} must use KEY=VALUE")
             name, raw_value = line.split("=", 1)
             name = name.strip()
-            if not name.startswith(("JEV_", "JQUANTS_")) and name != "TYPESAFE_API_KEY":
+            if not name.startswith(("JEV_", "JQUANTS_", "MOOMOO_")) and name != "TYPESAFE_API_KEY":
                 continue
             value = _parse_env_value(raw_value.strip(), line_number)
             values.setdefault(name, value)

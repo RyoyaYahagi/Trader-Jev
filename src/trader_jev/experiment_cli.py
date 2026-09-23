@@ -48,6 +48,12 @@ def build_parser() -> argparse.ArgumentParser:
     budget.add_argument("--db", required=True, type=Path)
     budget.add_argument("--plan-id", required=True)
 
+    adaptations = subparsers.add_parser(
+        "adaptations", help="Show automatic phase reviews and validation allocations."
+    )
+    adaptations.add_argument("--db", required=True, type=Path)
+    adaptations.add_argument("--plan-id", required=True)
+
     finish = subparsers.add_parser("finish", help="Finish a claimed run and persist results.")
     finish.add_argument("--db", required=True, type=Path)
     finish.add_argument("--run-id", required=True)
@@ -140,6 +146,11 @@ def main(argv: Sequence[str] | None = None) -> int:
                 budget_timezone=plan.operations.budget_timezone,
             )
             _print(status.model_dump(mode="json"))
+        return 0
+
+    if args.command == "adaptations":
+        with ExperimentRegistry(args.db) as registry:
+            _print(registry.adaptations(plan_id=args.plan_id))
         return 0
 
     if args.command == "finish":

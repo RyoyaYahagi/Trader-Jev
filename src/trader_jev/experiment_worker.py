@@ -44,6 +44,7 @@ from trader_jev.forward_paper import (
 from trader_jev.jev_http import JevHttpClient
 from trader_jev.jev_usage import JevPricingConfig
 from trader_jev.models import RiskProfile
+from trader_jev.moomoo import MoomooClientConfig, MoomooMarketDataAdapter
 from trader_jev.nasdaq_calendar import NasdaqCalendar
 from trader_jev.portfolio import ExitMode
 
@@ -203,6 +204,17 @@ class ExperimentWorker:
             return summary
 
         while True:
+            review = self.registry.review_adaptive_plan(self.plan)
+            if review is not None:
+                logger.info(
+                    "adaptive_experiment_review",
+                    extra={
+                        "plan_id": review.plan_id,
+                        "phase": review.phase,
+                        "selected_group_count": len(review.selected_group_keys),
+                        "created_run_count": len(review.created_run_ids),
+                    },
+                )
             while len(active) < max_concurrent:
                 lease = self.registry.claim_next(
                     worker_id=self.config.worker_id,
@@ -320,8 +332,14 @@ class ForwardPaperExecutor:
                     "jev_timeout_seconds": jev_client.config.timeout_seconds,
                 }
             )
+        market_data_config = MoomooClientConfig.from_env(self._env)
+        if "MOOMOO_POLL_INTERVAL_SECONDS" not in self._env:
+            market_data_config = market_data_config.model_copy(
+                update={"poll_interval_seconds": config.poll_interval_seconds}
+            )
         runner = ForwardPaperRunner(
             config,
+            market_data=MoomooMarketDataAdapter(market_data_config),
             jev_client=jev_client,
             jev_pricing=self._jev_pricing,
         )

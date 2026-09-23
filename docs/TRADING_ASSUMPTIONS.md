@@ -83,8 +83,8 @@ Hybrid components:
 
 Paper execution records the fee schedule and currency on every virtual fill.
 Forward Paper defaults to moomoo US equities Basic pricing: tax-included 0.132%
-of execution notional, capped at 22 USD per order and rounded up to a minimum
-of 0.01 USD. Japan cash equities default to the currently free transaction and
+of execution notional. The transaction fee is capped at 22 USD per order and
+rounded up to a minimum of 0.01 USD. Japan cash equities default to the currently free transaction and
 system fees. Matched trade records expose gross PnL, fees, and net PnL after
 fees. FX spread, ADR charges, borrow fees, and tax on investment gains are not
 included in this execution fee model.

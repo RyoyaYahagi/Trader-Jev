@@ -24,6 +24,7 @@ dependencies = [
 trader-jev-paper = "trader_jev.cli:main"
 trader-jev-train = "trader_jev.ml_cli:main"
 trader-jev-forward-paper = "trader_jev.forward_paper:main"
+trader-jev-experiment-worker = "trader_jev.experiment_worker:main"
 trader-jev-dashboard = "trader_jev.dashboard_server:main"
 trader-jev-experiment = "trader_jev.experiment_cli:main"
 

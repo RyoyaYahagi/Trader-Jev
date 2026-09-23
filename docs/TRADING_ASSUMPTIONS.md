@@ -32,8 +32,9 @@ Market dataはHistorical / Replayを優先する。Forward Paperで必要な場�
 
 ## Timing
 
-- prediction horizon: 3〜5分
-- decision cadence: 15秒相当
+- prediction horizon: 5分（15分・30分は質問セット整備後の候補）
+- decision cadence: 30秒相当
+- cadence探索: 15秒 / 30秒 / 60秒
 - U.S. forward paper: NASDAQ regular session 09:30〜16:00 ET
 - U.S. daylight saving time and standard time are resolved by `America/New_York`
 - NASDAQ holidays are skipped; published 13:00 ET early closes end the session early
@@ -77,7 +78,15 @@ Hybrid components:
 - stop-loss
 - take-profit
 - opposite signal
-- max holding 5 min
+- max holding 15 min
+
+初期値:
+- ATR period: 14
+- stop: 1.0 ATR
+- take-profit: 1.5R
+- ATR欠損時のfallback: 固定1% stop / 2% take-profit
+
+探索候補は `configs/jev-forward-paper-plan.yaml` に固定し、cadence、最大保有時間、ATR stop倍率、Jev方向確率・方向マージンを同一の実験台帳で比較する。
 
 ## Trading fees
 
@@ -98,7 +107,16 @@ Input:
 - optional NewsState
 - virtual portfolio state
 
-Confidence thresholdは事前固定しない。
+初期のJev方向ゲートは `p_up >= 0.60` かつ `p_up - max(p_flat, p_down) >= 0.10`。比較候補として `0.60/0.20` と `0.70/0.10` を登録する。これは暫定的なPaper探索値であり、校正・取引数・手数料控除後PnLを確認してから採用可否を決める。
+
+## Autonomous Paper experiment operations
+
+- 1日の新規run開始上限: 2件
+- 同時実行上限: 2件
+- 予算日: `America/New_York`
+- 失敗runの再試行は、既に開始済みのrunの再試行として扱い、新規run枠を追加消費しない
+- 自動実行は読み取り専用moomoo quote + `PaperBroker` のみ。取引・口座APIは使わない
+- 75 run（3 threshold cases × 5 enabled candidates × 5 replicates）を上限2件/日で進めるため、全候補を一巡する最短目安は38取引日
 
 ## ML
 
@@ -153,8 +171,8 @@ Gateを通過せずに後続Phaseを「完了」にしない。
 
 - specific 10 symbols
 - realtime non-broker data source
-- exact confidence threshold
-- exact stop/take-profit values
+- 最終採用するconfidence / direction probability threshold
+- 最終採用するstop/take-profit values
 - exact Paper minimum days/trades
 - exact Risk Profile numeric limits
 - when to enable pre-screening

@@ -124,7 +124,7 @@ InstrumentMetadata:
 
 1. Replay/Event sourceからmarket eventを受信
 2. FeatureEngine更新
-3. 15秒cadence相当でDecisionSnapshot freeze
+3. 30秒cadenceを初期値とし、candidateごとの間隔でDecisionSnapshot freeze
 4. data quality確認
 5. DecisionModel実行
 6. TradeIntent生成

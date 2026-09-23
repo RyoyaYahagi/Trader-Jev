@@ -1,0 +1,150 @@
+schema_version: "1"
+plan_id: jev-forward-paper-v1
+name: Autonomous Jev Forward Paper
+purpose: Accumulate independent Paper trading sessions for long-only Jev entry policies.
+replicates: 5
+context:
+  code_version: REPLACE_WITH_GIT_COMMIT
+  data_manifest_version: realtime-read-only-moomoo-v1
+  jev_model_version: jev-latest
+  question_set_version: jev-decision-v1
+operations:
+  mode: FORWARD_PAPER
+  daily_run_limit: 2
+  max_concurrent_runs: 2
+  poll_interval_seconds: 60
+  stale_after_seconds: 7200
+  budget_timezone: America/New_York
+base_config:
+  execution_mode: PAPER
+  decision_mode: JEV
+  symbols: [AAPL, MSFT, NVDA, AMZN, GOOGL, META, TSLA, AVGO, AMD, JPM]
+  initial_capital: "100000"
+  max_positions: 3
+  allow_short: true
+  market_hours_only: true
+  runtime_seconds: 3600
+  poll_interval_seconds: 1.0
+  fee_schedule: MOOMOO_US_BASIC
+  entry_mode: MARKET
+candidates:
+  - candidate_id: baseline-5m-30s-atr1-r1p5-15m
+    name: Baseline 5m / 30s / ATR1 / 1.5R / 15m
+    description: Initial operating point for the long-only Jev Paper session.
+    prediction_horizon_minutes: 5
+    decision_interval_seconds: 30
+    exit_mode: ATR
+    atr_period: 14
+    stop_atr_multiple: "1.0"
+    take_profit_r_multiple: "1.5"
+    max_holding_seconds: 900
+  - candidate_id: fast-cadence-5m-15s-atr1-r1p5-15m
+    name: Faster decision cadence
+    description: Same exit policy with 15-second Jev decisions.
+    prediction_horizon_minutes: 5
+    decision_interval_seconds: 15
+    exit_mode: ATR
+    atr_period: 14
+    stop_atr_multiple: "1.0"
+    take_profit_r_multiple: "1.5"
+    max_holding_seconds: 900
+  - candidate_id: slow-cadence-5m-60s-atr1-r1p5-15m
+    name: Slower decision cadence
+    description: Same exit policy with 60-second Jev decisions.
+    prediction_horizon_minutes: 5
+    decision_interval_seconds: 60
+    exit_mode: ATR
+    atr_period: 14
+    stop_atr_multiple: "1.0"
+    take_profit_r_multiple: "1.5"
+    max_holding_seconds: 900
+  - candidate_id: longer-hold-5m-30s-atr1-r1p5-30m
+    name: Longer maximum holding time
+    description: Re-evaluate the 5-minute forecast while allowing a 30-minute cap.
+    prediction_horizon_minutes: 5
+    decision_interval_seconds: 30
+    exit_mode: ATR
+    atr_period: 14
+    stop_atr_multiple: "1.0"
+    take_profit_r_multiple: "1.5"
+    max_holding_seconds: 1800
+  - candidate_id: wide-stop-5m-30s-atr1p5-r1p5-15m
+    name: Wider volatility stop
+    description: Test whether a 1.5 ATR stop reduces normal-volatility exits.
+    prediction_horizon_minutes: 5
+    decision_interval_seconds: 30
+    exit_mode: ATR
+    atr_period: 14
+    stop_atr_multiple: "1.5"
+    take_profit_r_multiple: "1.5"
+    max_holding_seconds: 900
+  - candidate_id: forecast-15m-backlog
+    name: 15-minute Jev forecast backlog
+    description: Reserve the candidate until a 15-minute Jev question set exists.
+    enabled: false
+    prediction_horizon_minutes: 15
+    decision_interval_seconds: 60
+    exit_mode: ATR
+    atr_period: 14
+    stop_atr_multiple: "1.0"
+    take_profit_r_multiple: "1.5"
+    max_holding_seconds: 1800
+  - candidate_id: forecast-30m-backlog
+    name: 30-minute Jev forecast backlog
+    description: Reserve the candidate until a 30-minute Jev question set exists.
+    enabled: false
+    prediction_horizon_minutes: 30
+    decision_interval_seconds: 60
+    exit_mode: ATR
+    atr_period: 14
+    stop_atr_multiple: "1.0"
+    take_profit_r_multiple: "1.5"
+    max_holding_seconds: 3600
+cases:
+  - case_id: jev-long-p60-m10
+    name: Long entry with 60% UP probability and 10% margin
+    description: Accept a long entry only when p_up and its directional margin pass the gate.
+    input_profile: MICROSTRUCTURE
+    prediction_target: DIRECTION_5M
+    decision_use: ENTRY_GATE
+    output_policy:
+      kind: DIRECTION_GATE
+      thresholds:
+        min_direction_probability: "0.60"
+        min_direction_margin: "0.10"
+      accept_actions: [LONG]
+    implementation: OUTPUT_POLICY_ADAPTER
+    tags: [forward-paper, long-only, baseline]
+  - case_id: jev-long-p60-m20
+    name: Long entry with 60% UP probability and 20% margin
+    description: Require a larger separation from FLAT and DOWN before entering.
+    input_profile: MICROSTRUCTURE
+    prediction_target: DIRECTION_5M
+    decision_use: ENTRY_GATE
+    output_policy:
+      kind: DIRECTION_GATE
+      thresholds:
+        min_direction_probability: "0.60"
+        min_direction_margin: "0.20"
+      accept_actions: [LONG]
+    implementation: OUTPUT_POLICY_ADAPTER
+    tags: [forward-paper, long-only, margin]
+  - case_id: jev-long-p70-m10
+    name: Long entry with 70% UP probability and 10% margin
+    description: Require stronger UP probability while retaining the baseline margin.
+    input_profile: MICROSTRUCTURE
+    prediction_target: DIRECTION_5M
+    decision_use: ENTRY_GATE
+    output_policy:
+      kind: DIRECTION_GATE
+      thresholds:
+        min_direction_probability: "0.70"
+        min_direction_margin: "0.10"
+      accept_actions: [LONG]
+    implementation: OUTPUT_POLICY_ADAPTER
+    tags: [forward-paper, long-only, probability]
+splits:
+  - split_id: forward-paper-session
+    kind: FORWARD_PAPER
+    data_id: moomoo-read-only-quote-session
+    selection_allowed: true

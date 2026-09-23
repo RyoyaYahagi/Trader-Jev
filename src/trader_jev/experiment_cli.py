@@ -40,6 +40,13 @@ def build_parser() -> argparse.ArgumentParser:
     claim.add_argument("--db", required=True, type=Path)
     claim.add_argument("--worker-id", required=True)
     claim.add_argument("--plan-id")
+    claim.add_argument("--max-concurrent-runs", type=int)
+    claim.add_argument("--daily-run-limit", type=int)
+    claim.add_argument("--budget-timezone")
+
+    budget = subparsers.add_parser("budget", help="Show daily and concurrent run capacity.")
+    budget.add_argument("--db", required=True, type=Path)
+    budget.add_argument("--plan-id", required=True)
 
     finish = subparsers.add_parser("finish", help="Finish a claimed run and persist results.")
     finish.add_argument("--db", required=True, type=Path)
@@ -95,6 +102,9 @@ def main(argv: Sequence[str] | None = None) -> int:
                     "plan_id": plan.plan_id,
                     "plan_hash": plan_hash,
                     "runs_registered": len(plan.runs()),
+                    "enabled_candidates": sum(candidate.enabled for candidate in plan.candidates),
+                    "daily_run_limit": plan.operations.daily_run_limit,
+                    "max_concurrent_runs": plan.operations.max_concurrent_runs,
                 }
             )
         return 0
@@ -108,8 +118,28 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     if args.command == "claim":
         with ExperimentRegistry(args.db) as registry:
-            lease = registry.claim_next(worker_id=args.worker_id, plan_id=args.plan_id)
+            lease = registry.claim_next(
+                worker_id=args.worker_id,
+                plan_id=args.plan_id,
+                max_concurrent_runs=args.max_concurrent_runs,
+                daily_run_limit=args.daily_run_limit,
+                budget_timezone=args.budget_timezone or "UTC",
+            )
             _print(None if lease is None else lease.model_dump(mode="json"))
+        return 0
+
+    if args.command == "budget":
+        with ExperimentRegistry(args.db) as registry:
+            plan = registry.get_plan(args.plan_id)
+            if plan is None:
+                raise SystemExit(f"unknown experiment plan: {args.plan_id}")
+            status = registry.budget_status(
+                plan_id=args.plan_id,
+                daily_run_limit=plan.operations.daily_run_limit,
+                max_concurrent_runs=plan.operations.max_concurrent_runs,
+                budget_timezone=plan.operations.budget_timezone,
+            )
+            _print(status.model_dump(mode="json"))
         return 0
 
     if args.command == "finish":

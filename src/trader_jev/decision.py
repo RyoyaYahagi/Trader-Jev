@@ -123,10 +123,17 @@ class JevDecisionAdapter:
         self._client = client
         self._clock = clock or SystemClock()
         self._audit: list[JevAuditRecord] = []
+        self._results: list[JevAdapterResult] = []
 
     @property
     def audit_records(self) -> tuple[JevAuditRecord, ...]:
         return tuple(self._audit)
+
+    @property
+    def results(self) -> tuple[JevAdapterResult, ...]:
+        """Return complete request/decision/audit records for this adapter."""
+
+        return tuple(self._results)
 
     async def decide(self, request: JevRequest) -> JevAdapterResult:
         sent_at = self._clock.now()
@@ -148,7 +155,9 @@ class JevDecisionAdapter:
                 response=self._safe_response(raw),
             )
             self._audit.append(audit)
-            return JevAdapterResult(request=request, decision=decision, audit=audit)
+            result = JevAdapterResult(request=request, decision=decision, audit=audit)
+            self._results.append(result)
+            return result
         except TimeoutError:
             return self._failure(request, sent_at, "JEV_TIMEOUT", "Jev response timed out")
         except Exception as exc:
@@ -232,7 +241,9 @@ class JevDecisionAdapter:
             error_reason=reason,
         )
         self._audit.append(audit)
-        return JevAdapterResult(request=request, audit=audit)
+        result = JevAdapterResult(request=request, audit=audit)
+        self._results.append(result)
+        return result
 
     @staticmethod
     def _safe_response(raw: JevDecision | Mapping[str, Any] | str) -> Mapping[str, Any] | None:
@@ -374,7 +385,7 @@ class RuleDecisionModel(DecisionModel):
 
 
 class DecisionCadenceConfig(DomainModel):
-    interval_seconds: int = Field(default=15, gt=0)
+    interval_seconds: int = Field(default=30, gt=0)
 
 
 class SingleFlightDecisionRunner:

@@ -39,6 +39,7 @@ class FeatureEngineConfig(DomainModel):
     """Explicit feature and data-quality policy for one engine."""
 
     history_window_seconds: int = Field(default=300, gt=0)
+    atr_period: int = Field(default=14, gt=0)
     max_data_age_seconds: float = Field(default=30.0, ge=0)
     top_n_levels: int = Field(default=5, gt=0)
     depth_within_bps: float = Field(default=5.0, gt=0)
@@ -261,7 +262,7 @@ class InMemoryFeatureEngine:
             "rsi": self._rsi(window_prices),
             "macd": macd,
             "macd_histogram": macd - signal,
-            "atr": self._atr(events, window_prices),
+            "atr": self._atr(events, window_prices, self._config.atr_period),
             "realized_volatility": self._realized_volatility(window_prices),
         }
 
@@ -358,7 +359,7 @@ class InMemoryFeatureEngine:
         )
 
     @staticmethod
-    def _atr(events: list[MarketEvent], prices: list[float]) -> float:
+    def _atr(events: list[MarketEvent], prices: list[float], period: int) -> float:
         bars = [event for event in events if isinstance(event, BarEvent)]
         if bars:
             ranges: list[float] = []
@@ -372,12 +373,15 @@ class InMemoryFeatureEngine:
                         max(high - low, abs(high - previous_close), abs(low - previous_close))
                     )
                 previous_close = close
-            return sum(ranges) / len(ranges)
+            selected = ranges[-period:]
+            return sum(selected) / len(selected)
         if len(prices) < 2:
             return 0.0
-        return sum(
+        ranges = [
             abs(current - previous) for previous, current in zip(prices, prices[1:], strict=False)
-        ) / (len(prices) - 1)
+        ]
+        selected = ranges[-period:]
+        return sum(selected) / len(selected)
 
     def _orderbook_features(
         self,

@@ -2,9 +2,9 @@
 
 この文書は、Jevに与える情報、Jevに予測させる対象、Jevの回答を使う売買判断、回答を受け入れる条件を、比較可能な実験単位として管理する方法を定めます。
 
-## 比較する4つの軸
+## 比較する5つの軸
 
-一つの実験ケースは、次の4軸を一つの設定として持ちます。
+一つの実験ケースは、次の5軸を一つの設定として持ちます。
 
 | 軸 | 例 | 比較する理由 |
 | --- | --- | --- |
@@ -12,6 +12,7 @@
 | 予測対象 | 次の判断区間の売買行動、5分方向、局面、セットアップ品質、ニュースによる無効化 | 方向予測と売買に必要な予測は同じではないため |
 | 回答の利用方法 | 直接売買、エントリー審査、決済審査、決済の強制、ポジションサイズの評価 | Jevを売買主体として使うか、既存ルールの審査役として使うかを比較するため |
 | 出力ポリシー | 直接採用、確率閾値、上位2候補の差、品質閾値、連続一致、ニュース拒否 | 同じJev回答でも採用条件によって取引数と損益が変わるため |
+| 運用候補 | 予測時間、判断間隔、ATR stop倍率、R倍率、最大保有時間 | Jevの予測対象と出口条件の時間スケールが合っているかを比較するため |
 
 確率は、Jevが返す方向確率または信頼度として記録します。これは「実際に利益になる確率」や「利確が損切りに先行する確率」を意味するとは限りません。したがって、閾値ごとに、予測値と実際の結果の対応も保存します。
 
@@ -30,7 +31,22 @@
 | `jev-barrier-entry` | 利確と損切りのどちらに先に到達するか | 新規エントリーの採否 | 確率の下限 | 専用質問が必要 |
 | `jev-entry-exit-split` | 5分方向 | エントリーと決済 | 入口と出口で別ポリシー | ポジション状態を使う実行が必要 |
 
-ケースの定義は [configs/jev-experiment-plan.yaml](../configs/jev-experiment-plan.yaml) にあります。数値は採用済みの最適値ではなく、比較を始める候補値です。
+ケースの定義は [configs/jev-experiment-plan.yaml](../configs/jev-experiment-plan.yaml) にあります。数値は採用済みの最適値ではなく、比較を始める候補値です。Forward Paperで自律実行する候補は [configs/jev-forward-paper-plan.yaml](../configs/jev-forward-paper-plan.yaml) に分離しています。
+
+## 初期値と探索候補
+
+初期の比較基準は次の設定です。
+
+| 項目 | 初期値 | 探索候補 |
+| --- | --- | --- |
+| Jevの予測対象 | 5分方向 `UP / FLAT / DOWN` | 15分・30分は質問セット追加後 |
+| Jev入力 | 板・約定・需給を含む `MICROSTRUCTURE` | テクニカルのみ、ニュース、ML、保有状態、全コンテキスト |
+| 採用条件 | `p_up >= 0.60` かつ方向マージン `>= 0.10` | `0.60/0.20`、`0.70/0.10` |
+| 判断間隔 | 30秒 | 15秒、60秒 |
+| 出口 | ATR(14) stop 1.0、take-profit 1.5R | stop 1.5 ATR、最大保有30分 |
+| 最大保有時間 | 15分 | 30分 |
+
+`p_up` は上昇方向に限った条件であり、利益になる確率を直接表すものではありません。各runでJevの入力・回答・採用理由、RiskEngineの承認／拒否、仮想約定、手数料控除後PnLを同じrun_idへ結び付けます。LONG専用ケースでも、`SHORT` は既存LONGを閉じる出口表現として利用でき、SHORT新規エントリーは作りません。
 
 ## 現在のJev接続との対応
 
@@ -60,9 +76,50 @@
 
 一つの条件を再実行した場合は、新しい実行試行として保存します。前回の失敗や結果を上書きしません。設定の内容が変わった場合は、同じ `plan_id` を再利用できません。これにより、計画名だけが同じで実体が変わる状態を防ぎます。
 
+`ExperimentPlan.candidates` は、候補パラメータの探索空間を表します。有効候補だけがrunへ展開され、無効候補もYAMLには残して「まだ試していない理由」を記録できます。runの設定ハッシュには、case、candidate、split、replicate、context、operationsを含めます。
+
 計画の `context` には、コード版、データマニフェスト版、Jevモデル版、質問セット版を記録します。サンプルの `REPLACE_WITH_...` は登録前に実際の値へ置き換えます。これらの値も実験設定ハッシュに含まれます。
 
 実験状態は `PLANNED`、`QUEUED`、`RUNNING`、`SUCCEEDED`、`FAILED`、`SKIPPED`、`INVALIDATED` のいずれかです。`SKIPPED` と `INVALIDATED` も理由を必須にするため、実験数の差分を後から説明できます。
+
+## 自律Forward Paperの運用
+
+`jev-forward-paper-v1` は、3つの方向ゲートケース × 5つの有効candidate × 5反復、合計75 runを登録します。15分・30分予測の2候補は質問セット未対応のため無効候補として計画に残し、runへは展開しません。
+
+運用上の初期値は次のとおりです。
+
+- 1日の新規run開始上限: 2件
+- 同時実行上限: 2件
+- 予算日: `America/New_York`
+- 1 run: 1つの独立したForward Paperポートフォリオ
+- 1 runの初期稼働時間: 3600秒、または `--until-nasdaq-close` で当日の通常取引終了まで
+- 失敗・タイムアウト: `FAILED` として理由・メトリクス・artifactを保存し、再試行可能
+- stale worker: heartbeatを監視し、復旧時は元のattemptを失敗として残して同じrunを再キュー
+
+日次上限は `started_at` がその予算日に初めて設定されたrun行を数えます。再試行は同じrun行のattempt追加なので新規枠を消費しません。75 runを一巡する最短目安は、失敗・休場を除き38取引日です。これは過学習を抑え、各候補に同程度の実時間を与えるための初期運用値です。
+
+登録と自動実行:
+
+```bash
+uv run trader-jev-experiment register \
+  --plan configs/jev-forward-paper-plan.yaml \
+  --db var/experiments.sqlite
+
+uv run trader-jev-experiment budget \
+  --db var/experiments.sqlite \
+  --plan-id jev-forward-paper-v1
+
+uv run trader-jev-experiment-worker \
+  --db var/experiments.sqlite \
+  --plan-id jev-forward-paper-v1 \
+  --worker-id paper-01 \
+  --env-file .env \
+  --report-dir var/paper-experiments \
+  --until-nasdaq-close \
+  --watch
+```
+
+workerは実注文を送らず、読み取り専用のmoomoo quoteを`MoomooMarketDataAdapter`で取得し、各独立runの注文を`PaperBroker`へ送ります。完了時には `forward-paper-summary` と `jev-calls` のartifactをSHA-256付きでSQLiteへ登録します。後者はJev request、正規化済みdecision、成功／失敗auditを1呼び出し1行で保持します。
 
 ## 運用手順
 

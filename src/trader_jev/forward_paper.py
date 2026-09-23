@@ -28,6 +28,7 @@ from trader_jev.clock import LiveClock
 from trader_jev.dashboard import DashboardReadModel
 from trader_jev.decision import (
     JevAdapterConfig,
+    JevAdapterResult,
     JevClient,
     JevDecisionAdapter,
     JevDecisionModel,
@@ -35,7 +36,8 @@ from trader_jev.decision import (
     RuleDecisionModel,
 )
 from trader_jev.execution import ExecutionConfig, PaperBroker
-from trader_jev.features import InMemoryFeatureEngine
+from trader_jev.experiments import JevInputProfile, JevOutputPolicy
+from trader_jev.features import FeatureEngineConfig, InMemoryFeatureEngine
 from trader_jev.fees import MoomooFeeSchedule
 from trader_jev.interfaces import Clock, DecisionModel, MarketDataAdapter
 from trader_jev.jev_http import JevHttpClient
@@ -65,7 +67,7 @@ from trader_jev.moomoo import MoomooClientConfig, MoomooMarketDataAdapter
 from trader_jev.nasdaq_calendar import NasdaqCalendar, NasdaqSession
 from trader_jev.observability import TradeRecord
 from trader_jev.pipeline import PipelineConfig, PipelineResult, TradingPipeline
-from trader_jev.portfolio import HybridExitPolicy, PortfolioLedger
+from trader_jev.portfolio import ExitMode, HybridExitPolicy, PortfolioLedger
 from trader_jev.risk import (
     DeterministicRiskEngine,
     RiskConfig,
@@ -185,9 +187,14 @@ class ForwardPaperConfig(DomainModel):
     symbols: tuple[str, ...] = DEFAULT_US_SYMBOLS
     initial_capital: Decimal = Field(default=Decimal("100000"), gt=Decimal("0"))
     runtime_seconds: int = Field(default=3600, gt=0)
-    decision_cadence_seconds: float = Field(default=15.0, ge=0)
+    prediction_horizon_minutes: int = Field(default=5, gt=0)
+    decision_cadence_seconds: float = Field(default=30.0, ge=0)
     max_positions: int = Field(default=3, gt=0)
-    max_holding_seconds: int = Field(default=300, gt=0)
+    max_holding_seconds: int = Field(default=900, gt=0)
+    exit_mode: ExitMode = ExitMode.ATR
+    atr_period: int = Field(default=14, gt=0)
+    stop_atr_multiple: Decimal = Field(default=Decimal("1.0"), gt=Decimal("0"))
+    take_profit_r_multiple: Decimal = Field(default=Decimal("1.5"), gt=Decimal("0"))
     stop_loss_pct: Decimal = Field(default=Decimal("0.01"), gt=Decimal("0"), lt=Decimal("1"))
     take_profit_pct: Decimal = Field(default=Decimal("0.02"), gt=Decimal("0"), lt=Decimal("1"))
     momentum_threshold: Decimal = Field(default=Decimal("0.0005"), ge=Decimal("0"), lt=Decimal("1"))
@@ -209,6 +216,8 @@ class ForwardPaperConfig(DomainModel):
     decision_mode: ForwardDecisionMode = ForwardDecisionMode.RULE
     jev_model: str = Field(default="jev-latest", min_length=1)
     jev_timeout_seconds: float = Field(default=5.0, gt=0)
+    jev_input_profile: JevInputProfile | None = None
+    jev_output_policy: JevOutputPolicy | None = None
 
     @field_validator("symbols")
     @classmethod
@@ -414,7 +423,9 @@ class ForwardPaperRunner:
             clock=self._clock,
             logger=self._logger,
         )
-        self.feature_engine = InMemoryFeatureEngine()
+        self.feature_engine = InMemoryFeatureEngine(
+            FeatureEngineConfig(atr_period=self.config.atr_period)
+        )
         self._jev_adapter: JevDecisionAdapter | None = None
         self._jev_transport: str | None = None
         if self.config.decision_mode is ForwardDecisionMode.JEV:
@@ -435,7 +446,12 @@ class ForwardPaperRunner:
                 clock=self._clock,
             )
             self.decision_model = _ReferencePriceDecisionModel(
-                JevDecisionModel(self._jev_adapter, strategy_id="forward-jev")
+                JevDecisionModel(
+                    self._jev_adapter,
+                    strategy_id="forward-jev",
+                    input_profile=self.config.jev_input_profile,
+                    output_policy=self.config.jev_output_policy,
+                )
             )
         else:
             self.decision_model = _ReferencePriceRuleModel(
@@ -461,6 +477,9 @@ class ForwardPaperRunner:
             max_holding=timedelta(seconds=self.config.max_holding_seconds),
             stop_loss_pct=self.config.stop_loss_pct,
             take_profit_pct=self.config.take_profit_pct,
+            mode=self.config.exit_mode,
+            stop_atr_multiple=self.config.stop_atr_multiple,
+            take_profit_r_multiple=self.config.take_profit_r_multiple,
         )
         self._last_decision_at: dict[str, datetime] = {}
         self._latest_snapshots: dict[str, Any] = {}
@@ -517,6 +536,14 @@ class ForwardPaperRunner:
 
     def add_error(self, message: str) -> None:
         self._errors.append(message)
+
+    @property
+    def jev_results(self) -> tuple[JevAdapterResult, ...]:
+        """Return all Jev calls, including holds and failed responses."""
+
+        if self._jev_adapter is None:
+            return ()
+        return self._jev_adapter.results
 
     async def close_open_positions(self) -> None:
         await self._close_open_positions()
@@ -577,10 +604,21 @@ class ForwardPaperRunner:
                 "fx_source": self.config.fx_source,
                 "decision_mode": self.config.decision_mode.value,
                 "decision_label": self.config.decision_mode.label,
+                "prediction_horizon_minutes": self.config.prediction_horizon_minutes,
                 "jev_transport": self._jev_transport,
                 "jev_model": (
                     self.config.jev_model
                     if self.config.decision_mode is ForwardDecisionMode.JEV
+                    else None
+                ),
+                "jev_input_profile": (
+                    self.config.jev_input_profile.value
+                    if self.config.jev_input_profile is not None
+                    else None
+                ),
+                "jev_output_policy": (
+                    self.config.jev_output_policy.model_dump(mode="json")
+                    if self.config.jev_output_policy is not None
                     else None
                 ),
                 "jev_timeout_seconds": (
@@ -593,6 +631,10 @@ class ForwardPaperRunner:
                 "decision_cadence_seconds": self.config.decision_cadence_seconds,
                 "max_positions": self.config.max_positions,
                 "max_holding_seconds": self.config.max_holding_seconds,
+                "exit_mode": self.config.exit_mode.value,
+                "atr_period": self.config.atr_period,
+                "stop_atr_multiple": str(self.config.stop_atr_multiple),
+                "take_profit_r_multiple": str(self.config.take_profit_r_multiple),
                 "stop_loss_pct": str(self.config.stop_loss_pct),
                 "take_profit_pct": str(self.config.take_profit_pct),
                 "momentum_threshold": str(self.config.momentum_threshold),
@@ -938,9 +980,18 @@ def build_parser() -> argparse.ArgumentParser:
             "(default: false)."
         ),
     )
-    parser.add_argument("--decision-cadence-seconds", type=_nonnegative_float, default=15.0)
+    parser.add_argument("--prediction-horizon-minutes", type=_positive_int, default=5)
+    parser.add_argument("--decision-cadence-seconds", type=_nonnegative_float, default=30.0)
     parser.add_argument("--max-positions", type=_positive_int, default=3)
-    parser.add_argument("--max-holding-seconds", type=_positive_int, default=300)
+    parser.add_argument("--max-holding-seconds", type=_positive_int, default=900)
+    parser.add_argument(
+        "--exit-mode",
+        choices=tuple(mode.value for mode in ExitMode),
+        default=ExitMode.ATR.value,
+    )
+    parser.add_argument("--atr-period", type=_positive_int, default=14)
+    parser.add_argument("--stop-atr-multiple", type=_decimal, default=Decimal("1.0"))
+    parser.add_argument("--take-profit-r-multiple", type=_decimal, default=Decimal("1.5"))
     parser.add_argument("--stop-loss-pct", type=_decimal, default=Decimal("0.01"))
     parser.add_argument("--take-profit-pct", type=_decimal, default=Decimal("0.02"))
     parser.add_argument("--momentum-threshold", type=_decimal, default=Decimal("0.0005"))
@@ -1062,9 +1113,14 @@ def main(argv: Sequence[str] | None = None) -> int:
             symbols=tuple(args.symbols.split(",")),
             initial_capital=args.initial_capital,
             runtime_seconds=runtime_seconds,
+            prediction_horizon_minutes=args.prediction_horizon_minutes,
             decision_cadence_seconds=args.decision_cadence_seconds,
             max_positions=args.max_positions,
             max_holding_seconds=args.max_holding_seconds,
+            exit_mode=ExitMode(args.exit_mode),
+            atr_period=args.atr_period,
+            stop_atr_multiple=args.stop_atr_multiple,
+            take_profit_r_multiple=args.take_profit_r_multiple,
             stop_loss_pct=args.stop_loss_pct,
             take_profit_pct=args.take_profit_pct,
             momentum_threshold=args.momentum_threshold,

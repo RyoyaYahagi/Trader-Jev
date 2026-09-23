@@ -10,11 +10,25 @@ context:
   question_set_version: jev-decision-v1
 base_config:
   execution_mode: PAPER
-  decision_interval_seconds: 15
+  decision_interval_seconds: 30
   prediction_horizon_minutes: 5
+  exit_mode: ATR
+  atr_period: 14
+  stop_atr_multiple: "1.0"
+  take_profit_r_multiple: "1.5"
+  max_holding_seconds: 900
+  entry_min_up_probability: "0.60"
+  entry_min_direction_margin: "0.10"
   universe_id: fixed-10
   fee_schedule: explicit-in-run-config
   jev_response_cache: required
+operations:
+  mode: FORWARD_PAPER
+  daily_run_limit: 2
+  max_concurrent_runs: 2
+  poll_interval_seconds: 60
+  stale_after_seconds: 7200
+  budget_timezone: America/New_York
 splits:
   - split_id: discovery
     kind: DISCOVERY

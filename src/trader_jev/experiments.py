@@ -14,11 +14,12 @@ import sqlite3
 import threading
 from collections.abc import Generator, Mapping, Sequence
 from contextlib import contextmanager
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 from enum import StrEnum
 from pathlib import Path
 from typing import Any
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from pydantic import Field, model_validator
 
@@ -129,6 +130,7 @@ class OutputPolicyKind(StrEnum):
     CONFIDENCE_THRESHOLD = "CONFIDENCE_THRESHOLD"
     TOP_PROBABILITY = "TOP_PROBABILITY"
     TOP_TWO_MARGIN = "TOP_TWO_MARGIN"
+    DIRECTION_GATE = "DIRECTION_GATE"
     SETUP_QUALITY_GATE = "SETUP_QUALITY_GATE"
     NEWS_INVALIDATION_GATE = "NEWS_INVALIDATION_GATE"
     RULE_AGREEMENT = "RULE_AGREEMENT"
@@ -160,6 +162,62 @@ class EvaluationSplitKind(StrEnum):
     FORWARD_PAPER = "FORWARD_PAPER"
 
 
+class ExperimentRunMode(StrEnum):
+    """Execution mode available to the autonomous experiment worker."""
+
+    FORWARD_PAPER = "FORWARD_PAPER"
+
+
+class ExperimentOperations(DomainModel):
+    """Operating limits for autonomous Paper experiment execution.
+
+    ``daily_run_limit`` counts new experiment run rows started on one budget
+    date. Retrying an already-started row does not consume another new-run
+    slot, while ``max_concurrent_runs`` counts all currently running rows.
+    """
+
+    mode: ExperimentRunMode = ExperimentRunMode.FORWARD_PAPER
+    daily_run_limit: int = Field(default=2, ge=1)
+    max_concurrent_runs: int = Field(default=2, ge=1)
+    poll_interval_seconds: int = Field(default=60, ge=1)
+    stale_after_seconds: int = Field(default=7_200, ge=1)
+    budget_timezone: str = Field(default="UTC", min_length=1)
+
+    @model_validator(mode="after")
+    def validate_budget_timezone(self) -> ExperimentOperations:
+        try:
+            ZoneInfo(self.budget_timezone)
+        except ZoneInfoNotFoundError as exc:
+            raise ValueError(f"unknown budget_timezone: {self.budget_timezone}") from exc
+        return self
+
+
+class ExperimentCandidate(DomainModel):
+    """One immutable timing and exit parameter set applied to a plan."""
+
+    candidate_id: str = Field(
+        default="default",
+        min_length=1,
+        pattern=r"^[A-Za-z0-9][A-Za-z0-9_.-]*$",
+    )
+    name: str = Field(default="Default candidate", min_length=1)
+    description: str = Field(default="Default Paper candidate", min_length=1)
+    enabled: bool = True
+    prediction_horizon_minutes: int = Field(default=5, gt=0)
+    decision_interval_seconds: int = Field(default=30, gt=0)
+    exit_mode: str = Field(default="ATR", pattern=r"^(ATR|FIXED_PCT)$")
+    atr_period: int = Field(default=14, gt=0)
+    stop_atr_multiple: Decimal = Field(default=Decimal("1.0"), gt=Decimal("0"))
+    take_profit_r_multiple: Decimal = Field(default=Decimal("1.5"), gt=Decimal("0"))
+    max_holding_seconds: int = Field(default=900, gt=0)
+    fallback_stop_loss_pct: Decimal = Field(
+        default=Decimal("0.01"), gt=Decimal("0"), lt=Decimal("1")
+    )
+    fallback_take_profit_pct: Decimal = Field(
+        default=Decimal("0.02"), gt=Decimal("0"), lt=Decimal("1")
+    )
+
+
 class RunStatus(StrEnum):
     """Lifecycle state of one fully resolved experiment run."""
 
@@ -187,6 +245,10 @@ class ThresholdPolicy(DomainModel):
     min_confidence: Decimal | None = Field(default=None, ge=Decimal("0"), le=Decimal("1"))
     min_top_probability: Decimal | None = Field(default=None, ge=Decimal("0"), le=Decimal("1"))
     min_top_two_margin: Decimal | None = Field(default=None, ge=Decimal("0"), le=Decimal("1"))
+    min_direction_probability: Decimal | None = Field(
+        default=None, ge=Decimal("0"), le=Decimal("1")
+    )
+    min_direction_margin: Decimal | None = Field(default=None, ge=Decimal("0"), le=Decimal("1"))
     min_setup_quality: Decimal | None = Field(default=None, ge=Decimal("0"), le=Decimal("1"))
     allow_news_invalidated: bool = False
     min_expected_return_bps: Decimal | None = None
@@ -208,11 +270,22 @@ class JevOutputPolicy(DomainModel):
             OutputPolicyKind.CONFIDENCE_THRESHOLD: thresholds.min_confidence,
             OutputPolicyKind.TOP_PROBABILITY: thresholds.min_top_probability,
             OutputPolicyKind.TOP_TWO_MARGIN: thresholds.min_top_two_margin,
+            OutputPolicyKind.DIRECTION_GATE: thresholds.min_direction_probability,
             OutputPolicyKind.SETUP_QUALITY_GATE: thresholds.min_setup_quality,
         }
         selected = required.get(self.kind)
-        if self.kind in required and selected is None:
+        if (
+            self.kind in required
+            and self.kind is not OutputPolicyKind.DIRECTION_GATE
+            and selected is None
+        ):
             raise ValueError(f"{self.kind.value} requires its matching threshold")
+        if self.kind is OutputPolicyKind.DIRECTION_GATE and (
+            thresholds.min_direction_probability is None and thresholds.min_direction_margin is None
+        ):
+            raise ValueError(
+                "DIRECTION_GATE requires min_direction_probability or min_direction_margin"
+            )
         if not self.accept_actions:
             raise ValueError("accept_actions must contain at least one action")
         return self
@@ -270,6 +343,52 @@ def evaluate_output_policy(
     elif policy.kind is OutputPolicyKind.TOP_TWO_MARGIN:
         observed = getattr(decision, "top_two_margin", None)
         threshold = thresholds.min_top_two_margin
+    elif policy.kind is OutputPolicyKind.DIRECTION_GATE:
+        target_probability: Decimal | None
+        competitor_probabilities: tuple[Decimal, ...]
+        if proposed_action is Action.LONG:
+            target_probability = getattr(decision, "p_up", None)
+            competitor_probabilities = tuple(
+                value
+                for value in (
+                    getattr(decision, "p_flat", None),
+                    getattr(decision, "p_down", None),
+                )
+                if value is not None
+            )
+        elif proposed_action is Action.SHORT:
+            target_probability = getattr(decision, "p_down", None)
+            competitor_probabilities = tuple(
+                value
+                for value in (
+                    getattr(decision, "p_up", None),
+                    getattr(decision, "p_flat", None),
+                )
+                if value is not None
+            )
+        else:
+            return reject("DIRECTION_NOT_ACTIONABLE", "direction gate cannot accept HOLD")
+        if thresholds.min_direction_probability is not None:
+            observed = target_probability
+            threshold = thresholds.min_direction_probability
+        elif thresholds.min_direction_margin is not None:
+            # The final missing-answer check is shared by the stateless gates.
+            # Use a neutral synthetic comparison when this policy intentionally
+            # has no absolute probability threshold.
+            observed = Decimal("0")
+            threshold = Decimal("0")
+        if thresholds.min_direction_margin is not None:
+            if target_probability is None or not competitor_probabilities:
+                return reject(
+                    "MISSING_DIRECTION_PROBABILITIES",
+                    "direction gate requires target and competitor probabilities",
+                )
+            margin = target_probability - max(competitor_probabilities)
+            if margin < thresholds.min_direction_margin:
+                return reject(
+                    "DIRECTION_MARGIN_REJECTED",
+                    f"direction margin {margin} is below {thresholds.min_direction_margin}",
+                )
     elif policy.kind is OutputPolicyKind.SETUP_QUALITY_GATE:
         observed = getattr(decision, "setup_quality", None)
         threshold = thresholds.min_setup_quality
@@ -295,6 +414,7 @@ def evaluate_output_policy(
         OutputPolicyKind.CONFIDENCE_THRESHOLD,
         OutputPolicyKind.TOP_PROBABILITY,
         OutputPolicyKind.TOP_TWO_MARGIN,
+        OutputPolicyKind.DIRECTION_GATE,
         OutputPolicyKind.SETUP_QUALITY_GATE,
     } and (observed is None or threshold is None):
         code = (
@@ -380,18 +500,27 @@ class ExperimentPlan(DomainModel):
     replicates: int = Field(default=1, ge=1)
     context: ExperimentContext = Field(default_factory=ExperimentContext)
     base_config: Mapping[str, Any] = Field(default_factory=dict)
+    operations: ExperimentOperations = Field(default_factory=ExperimentOperations)
+    candidates: tuple[ExperimentCandidate, ...] = Field(
+        default_factory=lambda: (ExperimentCandidate(),)
+    )
     schema_version: str = Field(default="1", min_length=1)
 
     @model_validator(mode="after")
     def validate_unique_ids(self) -> ExperimentPlan:
         case_ids = [case.case_id for case in self.cases]
         split_ids = [split.split_id for split in self.splits]
+        candidate_ids = [candidate.candidate_id for candidate in self.candidates]
         if len(set(case_ids)) != len(case_ids):
             raise ValueError("case_id values must be unique within a plan")
         if len(set(split_ids)) != len(split_ids):
             raise ValueError("split_id values must be unique within a plan")
+        if len(set(candidate_ids)) != len(candidate_ids):
+            raise ValueError("candidate_id values must be unique within a plan")
         if not any(case.enabled for case in self.cases):
             raise ValueError("at least one experiment case must be enabled")
+        if not any(candidate.enabled for candidate in self.candidates):
+            raise ValueError("at least one experiment candidate must be enabled")
         return self
 
     @classmethod
@@ -429,33 +558,38 @@ class ExperimentPlan(DomainModel):
             for case in self.cases:
                 if not case.enabled:
                     continue
-                for replicate in range(1, self.replicates + 1):
-                    config: dict[str, Any] = {
-                        "base_config": self.base_config,
-                        "case": case.model_dump(mode="json"),
-                        "context": self.context.model_dump(mode="json"),
-                        "split": split.model_dump(mode="json"),
-                        "replicate": replicate,
-                    }
-                    config_hash = _hash_json(config)
-                    if config_hash in seen_hashes:
-                        raise ValueError("plan expands duplicate run configurations")
-                    seen_hashes.add(config_hash)
-                    resolved.append(
-                        ExperimentRunSpec(
-                            run_id=(
-                                f"{self.plan_id}__{split.split_id}__{case.case_id}"
-                                f"__r{replicate:02d}"
-                            ),
-                            plan_id=self.plan_id,
-                            case_id=case.case_id,
-                            split_id=split.split_id,
-                            split_kind=split.kind,
-                            replicate=replicate,
-                            config_hash=config_hash,
-                            config=config,
+                for candidate in self.candidates:
+                    if not candidate.enabled:
+                        continue
+                    for replicate in range(1, self.replicates + 1):
+                        config: dict[str, Any] = {
+                            "base_config": self.base_config,
+                            "case": case.model_dump(mode="json"),
+                            "candidate": candidate.model_dump(mode="json"),
+                            "context": self.context.model_dump(mode="json"),
+                            "operations": self.operations.model_dump(mode="json"),
+                            "split": split.model_dump(mode="json"),
+                            "replicate": replicate,
+                        }
+                        config_hash = _hash_json(config)
+                        if config_hash in seen_hashes:
+                            raise ValueError("plan expands duplicate run configurations")
+                        seen_hashes.add(config_hash)
+                        resolved.append(
+                            ExperimentRunSpec(
+                                run_id=(
+                                    f"{self.plan_id}__{split.split_id}__{case.case_id}"
+                                    f"__{candidate.candidate_id}__r{replicate:02d}"
+                                ),
+                                plan_id=self.plan_id,
+                                case_id=case.case_id,
+                                split_id=split.split_id,
+                                split_kind=split.kind,
+                                replicate=replicate,
+                                config_hash=config_hash,
+                                config=config,
+                            )
                         )
-                    )
         return tuple(resolved)
 
 
@@ -507,6 +641,20 @@ class ExperimentLease(DomainModel):
     attempt_number: int
     worker_id: str
     claimed_at: datetime
+
+
+class ExperimentBudgetStatus(DomainModel):
+    """Current daily and concurrent capacity of one experiment plan."""
+
+    plan_id: str | None = None
+    budget_date: date
+    daily_started: int = Field(ge=0)
+    daily_run_limit: int | None = Field(default=None, ge=1)
+    running: int = Field(ge=0)
+    max_concurrent_runs: int | None = Field(default=None, ge=1)
+    queued: int = Field(ge=0)
+    remaining_today: int | None = Field(default=None, ge=0)
+    available_concurrency: int | None = Field(default=None, ge=0)
 
 
 class ExperimentResult(DomainModel):
@@ -670,13 +818,48 @@ class ExperimentRegistry:
             )
             return cursor.rowcount
 
-    def claim_next(self, *, worker_id: str, plan_id: str | None = None) -> ExperimentLease | None:
-        """Atomically claim one planned or queued run for a worker."""
+    def claim_next(
+        self,
+        *,
+        worker_id: str,
+        plan_id: str | None = None,
+        split_kind: EvaluationSplitKind | None = None,
+        max_concurrent_runs: int | None = None,
+        daily_run_limit: int | None = None,
+        budget_timezone: str = "UTC",
+        now: datetime | None = None,
+    ) -> ExperimentLease | None:
+        """Atomically claim one run while enforcing optional operating limits."""
 
         if not worker_id.strip():
             raise ValueError("worker_id must not be empty")
-        now = _now_text()
+        if max_concurrent_runs is not None and max_concurrent_runs <= 0:
+            raise ValueError("max_concurrent_runs must be positive")
+        if daily_run_limit is not None and daily_run_limit <= 0:
+            raise ValueError("daily_run_limit must be positive")
+        current_time = _aware_now(now)
+        zone = _zone_info(budget_timezone)
+        now_text = current_time.astimezone(UTC).isoformat()
+        budget_date = current_time.astimezone(zone).date()
         with self._transaction() as connection:
+            if max_concurrent_runs is not None:
+                running_query = "SELECT COUNT(*) AS count FROM experiment_runs WHERE status = ?"
+                running_values: list[str] = [RunStatus.RUNNING.value]
+                if plan_id is not None:
+                    running_query += " AND plan_id = ?"
+                    running_values.append(plan_id)
+                running_row = connection.execute(running_query, running_values).fetchone()
+                if running_row is not None and int(running_row["count"]) >= max_concurrent_runs:
+                    return None
+            if daily_run_limit is not None:
+                started = self._count_started_on_date(
+                    connection,
+                    plan_id=plan_id,
+                    budget_date=budget_date,
+                    budget_timezone=zone,
+                )
+                if started >= daily_run_limit:
+                    return None
             query = """
                 SELECT * FROM experiment_runs
                 WHERE status IN (?, ?)
@@ -685,6 +868,9 @@ class ExperimentRegistry:
             if plan_id is not None:
                 query += " AND plan_id = ?"
                 values.append(plan_id)
+            if split_kind is not None:
+                query += " AND split_kind = ?"
+                values.append(split_kind.value)
             query += """
                 ORDER BY CASE status WHEN 'QUEUED' THEN 0 ELSE 1 END,
                          created_at, run_id
@@ -710,7 +896,7 @@ class ExperimentRegistry:
                     error_code = NULL, error_reason = NULL
                 WHERE run_id = ?
                 """,
-                (RunStatus.RUNNING.value, now, now, run_id),
+                (RunStatus.RUNNING.value, now_text, now_text, run_id),
             )
             cursor = connection.execute(
                 """
@@ -718,7 +904,14 @@ class ExperimentRegistry:
                     (run_id, attempt_number, status, worker_id, started_at, heartbeat_at)
                 VALUES (?, ?, ?, ?, ?, ?)
                 """,
-                (run_id, attempt_number, RunStatus.RUNNING.value, worker_id, now, now),
+                (
+                    run_id,
+                    attempt_number,
+                    RunStatus.RUNNING.value,
+                    worker_id,
+                    now_text,
+                    now_text,
+                ),
             )
             if cursor.lastrowid is None:
                 raise ExperimentRegistryError("SQLite did not return an attempt ID")
@@ -737,7 +930,61 @@ class ExperimentRegistry:
             attempt_id=attempt_id,
             attempt_number=attempt_number,
             worker_id=worker_id,
-            claimed_at=_parse_time(now),
+            claimed_at=_parse_time(now_text),
+        )
+
+    def budget_status(
+        self,
+        *,
+        plan_id: str | None = None,
+        daily_run_limit: int | None = None,
+        max_concurrent_runs: int | None = None,
+        budget_timezone: str = "UTC",
+        now: datetime | None = None,
+    ) -> ExperimentBudgetStatus:
+        """Return the capacity used by a plan without claiming a run."""
+
+        if max_concurrent_runs is not None and max_concurrent_runs <= 0:
+            raise ValueError("max_concurrent_runs must be positive")
+        if daily_run_limit is not None and daily_run_limit <= 0:
+            raise ValueError("daily_run_limit must be positive")
+        current_time = _aware_now(now)
+        zone = _zone_info(budget_timezone)
+        budget_date = current_time.astimezone(zone).date()
+        with self._lock:
+            running_query = "SELECT COUNT(*) AS count FROM experiment_runs WHERE status = ?"
+            running_values: list[str] = [RunStatus.RUNNING.value]
+            queued_query = "SELECT COUNT(*) AS count FROM experiment_runs WHERE status IN (?, ?)"
+            queued_values: list[str] = [RunStatus.QUEUED.value, RunStatus.PLANNED.value]
+            if plan_id is not None:
+                running_query += " AND plan_id = ?"
+                running_values.append(plan_id)
+                queued_query += " AND plan_id = ?"
+                queued_values.append(plan_id)
+            running_row = self._connection.execute(running_query, running_values).fetchone()
+            queued_row = self._connection.execute(queued_query, queued_values).fetchone()
+            started = self._count_started_on_date(
+                self._connection,
+                plan_id=plan_id,
+                budget_date=budget_date,
+                budget_timezone=zone,
+            )
+        remaining = None if daily_run_limit is None else max(0, daily_run_limit - started)
+        available = (
+            None
+            if max_concurrent_runs is None
+            else max(0, max_concurrent_runs - int(running_row["count"]))
+        )
+        return ExperimentBudgetStatus(
+            plan_id=plan_id,
+            budget_date=budget_date,
+            daily_started=started,
+            daily_run_limit=daily_run_limit,
+            running=int(running_row["count"]),
+            max_concurrent_runs=max_concurrent_runs,
+            queued=int(queued_row["count"]),
+            remaining_today=remaining,
+            available_concurrency=available,
         )
 
     def heartbeat(self, lease: ExperimentLease) -> None:
@@ -881,6 +1128,8 @@ class ExperimentRegistry:
         *,
         error_code: str,
         error_reason: str,
+        metrics: Sequence[ExperimentMetric] = (),
+        artifacts: Sequence[ExperimentArtifact] = (),
     ) -> ExperimentRunRecord:
         """Close an attempt as failed without deleting any prior attempt."""
 
@@ -889,8 +1138,28 @@ class ExperimentRegistry:
         return self._finish(
             lease,
             status=RunStatus.FAILED,
+            metrics=metrics,
+            artifacts=artifacts,
             error_code=error_code,
             error_reason=error_reason,
+        )
+
+    def skip_lease(
+        self,
+        lease: ExperimentLease,
+        *,
+        reason: str,
+        error_code: str = "SKIPPED_BY_WORKER",
+    ) -> ExperimentRunRecord:
+        """Finish a claimed run as SKIPPED while retaining its attempt."""
+
+        if not error_code.strip() or not reason.strip():
+            raise ValueError("error_code and reason must not be empty")
+        return self._finish(
+            lease,
+            status=RunStatus.SKIPPED,
+            error_code=error_code,
+            error_reason=reason,
         )
 
     def retry_failed(self, run_id: str) -> ExperimentRunRecord:
@@ -1105,6 +1374,25 @@ class ExperimentRegistry:
             raise ExperimentRegistryError(f"run disappeared during completion: {lease.run.run_id}")
         return self._run_from_row(row)
 
+    @staticmethod
+    def _count_started_on_date(
+        connection: sqlite3.Connection,
+        *,
+        plan_id: str | None,
+        budget_date: date,
+        budget_timezone: ZoneInfo,
+    ) -> int:
+        query = "SELECT started_at FROM experiment_runs WHERE started_at IS NOT NULL"
+        values: list[str] = []
+        if plan_id is not None:
+            query += " AND plan_id = ?"
+            values.append(plan_id)
+        rows = connection.execute(query, values).fetchall()
+        return sum(
+            _parse_time(str(row["started_at"])).astimezone(budget_timezone).date() == budget_date
+            for row in rows
+        )
+
     def _change_unstarted_status(
         self,
         run_id: str,
@@ -1280,6 +1568,20 @@ def _now_text() -> str:
     return datetime.now(UTC).isoformat()
 
 
+def _aware_now(value: datetime | None) -> datetime:
+    current = value or datetime.now(UTC)
+    if current.tzinfo is None or current.utcoffset() is None:
+        raise ValueError("now must be timezone-aware")
+    return current
+
+
+def _zone_info(value: str) -> ZoneInfo:
+    try:
+        return ZoneInfo(value)
+    except ZoneInfoNotFoundError as exc:
+        raise ValueError(f"unknown budget_timezone: {value}") from exc
+
+
 def _parse_time(value: str) -> datetime:
     parsed = datetime.fromisoformat(value)
     if parsed.tzinfo is None or parsed.utcoffset() is None:
@@ -1294,15 +1596,19 @@ __all__ = [
     "ExperimentContext",
     "ExperimentArtifact",
     "ExperimentCase",
+    "ExperimentCandidate",
     "ExperimentImplementation",
     "ExperimentLease",
     "ExperimentMetric",
+    "ExperimentBudgetStatus",
+    "ExperimentOperations",
     "ExperimentPlan",
     "ExperimentRegistry",
     "ExperimentRegistryError",
     "ExperimentResult",
     "ExperimentRunRecord",
     "ExperimentRunSpec",
+    "ExperimentRunMode",
     "JevInputProfile",
     "JevOutputPolicy",
     "JevPredictionTarget",

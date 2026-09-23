@@ -17,6 +17,7 @@ from trader_jev.forward_paper import (
     build_us_instruments,
 )
 from trader_jev.models import ExecutionMode, InstrumentMetadata, MarketEvent, QuoteEvent
+from trader_jev.portfolio import ExitMode
 
 NOW = datetime(2026, 9, 21, 14, 0, tzinfo=UTC)
 
@@ -67,6 +68,18 @@ def quote(
         bid_size=Decimal("1000"),
         ask_size=Decimal("1000"),
     )
+
+
+def test_forward_paper_defaults_match_initial_jev_operating_point() -> None:
+    config = ForwardPaperConfig()
+
+    assert config.prediction_horizon_minutes == 5
+    assert config.decision_cadence_seconds == 30
+    assert config.max_holding_seconds == 900
+    assert config.exit_mode is ExitMode.ATR
+    assert config.atr_period == 14
+    assert config.stop_atr_multiple == Decimal("1.0")
+    assert config.take_profit_r_multiple == Decimal("1.5")
 
 
 @pytest.mark.asyncio

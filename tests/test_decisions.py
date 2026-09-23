@@ -80,6 +80,8 @@ async def test_jev_adapter_normalizes_typed_decision_and_audits_compact_request(
     assert result.decision.top_two_margin == 0.5
     assert len(request.model_dump_json()) < 16_384
     assert len(adapter.audit_records) == 1
+    assert len(adapter.results) == 1
+    assert adapter.results[0].request.snapshot_id == request.snapshot_id
     assert client.requests[0].snapshot_id == request.snapshot_id
 
 

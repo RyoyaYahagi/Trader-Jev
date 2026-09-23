@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta
 from decimal import ROUND_DOWN, Decimal
+from enum import StrEnum
 
 from pydantic import Field
 
@@ -324,6 +325,13 @@ class FixedTimeExitPolicy:
         )
 
 
+class ExitMode(StrEnum):
+    """Price threshold source used by the hybrid Paper exit policy."""
+
+    FIXED_PCT = "FIXED_PCT"
+    ATR = "ATR"
+
+
 class HybridExitPolicy(FixedTimeExitPolicy):
     """Combine time, stop-loss, and take-profit exits."""
 
@@ -332,12 +340,24 @@ class HybridExitPolicy(FixedTimeExitPolicy):
         max_holding: timedelta = timedelta(minutes=5),
         stop_loss_pct: Decimal = Decimal("0.01"),
         take_profit_pct: Decimal = Decimal("0.02"),
+        mode: ExitMode | str = ExitMode.FIXED_PCT,
+        atr_key: str = "atr",
+        stop_atr_multiple: Decimal = Decimal("1.0"),
+        take_profit_r_multiple: Decimal = Decimal("1.5"),
     ) -> None:
         super().__init__(max_holding)
         if stop_loss_pct <= 0 or take_profit_pct <= 0:
             raise ValueError("stop_loss_pct and take_profit_pct must be positive")
+        self.mode = ExitMode(mode)
+        if not atr_key.strip():
+            raise ValueError("atr_key must not be empty")
+        if stop_atr_multiple <= 0 or take_profit_r_multiple <= 0:
+            raise ValueError("ATR and reward multiples must be positive")
         self.stop_loss_pct = stop_loss_pct
         self.take_profit_pct = take_profit_pct
+        self.atr_key = atr_key
+        self.stop_atr_multiple = stop_atr_multiple
+        self.take_profit_r_multiple = take_profit_r_multiple
 
     def evaluate(
         self,
@@ -352,17 +372,22 @@ class HybridExitPolicy(FixedTimeExitPolicy):
         if quantity == 0 or average is None:
             return None
         current = snapshot.market.mid
-        return_pct = (current - average) / average if average else Decimal("0")
+        stop_distance, target_distance, threshold_source = self._thresholds(snapshot, average)
+        if stop_distance <= 0 or target_distance <= 0:
+            return None
         should_exit = (
             quantity > 0
-            and (return_pct <= -self.stop_loss_pct or return_pct >= self.take_profit_pct)
+            and (current <= average - stop_distance or current >= average + target_distance)
         ) or (
             quantity < 0
-            and (return_pct >= self.stop_loss_pct or return_pct <= -self.take_profit_pct)
+            and (current >= average + stop_distance or current <= average - target_distance)
         )
         if not should_exit:
             return None
-        reason = "STOP_LOSS" if abs(return_pct) >= self.stop_loss_pct else "TAKE_PROFIT"
+        is_stop = (quantity > 0 and current <= average - stop_distance) or (
+            quantity < 0 and current >= average + stop_distance
+        )
+        reason = "STOP_LOSS" if is_stop else "TAKE_PROFIT"
         return TradeIntent(
             snapshot_id=snapshot.snapshot_id,
             instrument=snapshot.instrument,
@@ -371,8 +396,33 @@ class HybridExitPolicy(FixedTimeExitPolicy):
             strategy_id="hybrid-exit",
             reason=reason,
             created_at=snapshot.as_of,
-            metadata={"exit_reason": reason},
+            metadata={
+                "exit_reason": reason,
+                "exit_threshold_source": threshold_source,
+                "stop_distance": str(stop_distance),
+                "take_profit_distance": str(target_distance),
+            },
         )
+
+    def _thresholds(
+        self,
+        snapshot: DecisionSnapshot,
+        average: Decimal,
+    ) -> tuple[Decimal, Decimal, str]:
+        if self.mode is ExitMode.ATR:
+            raw_atr = snapshot.technical.get(self.atr_key)
+            if raw_atr is not None:
+                atr = Decimal(str(raw_atr))
+                if atr > 0:
+                    stop_distance = atr * self.stop_atr_multiple
+                    return (
+                        stop_distance,
+                        stop_distance * self.take_profit_r_multiple,
+                        f"ATR:{self.atr_key}",
+                    )
+        stop_distance = average * self.stop_loss_pct
+        target_distance = average * self.take_profit_pct
+        return stop_distance, target_distance, "FIXED_PCT_FALLBACK"
 
 
 # Short aliases make the intent explicit to users of the package.
@@ -380,6 +430,7 @@ PortfolioPolicy = PaperPortfolioPolicy
 
 
 __all__ = [
+    "ExitMode",
     "FixedTimeExitPolicy",
     "HybridExitPolicy",
     "InMemoryPortfolioRepository",

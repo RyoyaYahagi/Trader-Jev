@@ -48,10 +48,12 @@ Market data sourceはBroker APIに固定しない。Historical dataset / file / 
 
 ## 4. Trading horizon and cadence
 
-- Primary prediction horizon: 3〜5分
-- Initial decision interval: 15秒相当
+- Primary prediction horizon: 5分
+- 15分・30分の予測は、対応するJev質問セットを追加した後のバックログ候補とする
+- Initial decision interval: 30秒相当
+- 探索候補: 15秒 / 30秒 / 60秒
 - 初期対象: 固定10銘柄
-- Replayでも15秒decision cadenceを再現可能にする
+- Replayでも各candidateのdecision cadenceを再現可能にする
 
 ## 5. Universe
 
@@ -111,7 +113,7 @@ Jevへは最新特徴量 + compact short history summaryを渡す。
 - probabilities / confidence
 - optional news_invalidates_signal
 
-Confidence thresholdは事前固定しない。Paper結果からthreshold / top-2 margin別に分析する。
+初期の方向ゲートは `p_up >= 0.60` かつ `p_up - max(p_flat, p_down) >= 0.10` とする。探索では `0.60/0.20`、`0.70/0.10` も同じデータ・同じ出口条件で比較し、いずれも最終採用値とはみなさない。確率は利益確率そのものではないため、確率帯ごとの実現結果、取引数、手数料控除後損益を記録する。
 
 ## 9. ML role
 
@@ -186,19 +188,22 @@ Primary:
 - Hybrid Exit
 
 Components:
-- max holding 5 min
+- max holding 15 min
 - stop-loss
 - take-profit
 - strong opposite signal
 - forced time exit
 
-Baseline:
-- fixed 5-minute exit
+Initial Paper baseline:
+- ATR(14) × 1.0 stop distance
+- take-profit = 1.5R（RはATR stop distance）
+- ATRが利用できない場合のfallbackは固定1% stop / 2% take-profit
+- 最大保有時間15分
 
 Stop/TP rollout:
-1. fixed %
-2. ATR / realized-volatility
-3. confidence-aware later
+1. 初期: ATR(14) / 1.0 stop / 1.5R / 15分
+2. 探索: cadence 15/30/60秒、最大保有15/30分、stop 1.0/1.5 ATR
+3. 将来: realized-volatility、confidence-aware、Jevの保有中出口審査
 
 ## 15. Historical and Paper evaluation
 

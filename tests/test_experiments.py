@@ -6,14 +6,17 @@ from pathlib import Path
 
 import pytest
 
+from trader_jev.decision import JevDecision
 from trader_jev.experiments import (
     DecisionUse,
     EvaluationSplit,
     EvaluationSplitKind,
+    ExperimentCandidate,
     ExperimentCase,
     ExperimentContext,
     ExperimentImplementation,
     ExperimentMetric,
+    ExperimentOperations,
     ExperimentPlan,
     ExperimentRegistry,
     ExperimentRegistryError,
@@ -24,7 +27,9 @@ from trader_jev.experiments import (
     RunStatus,
     ThresholdPolicy,
     artifact_for_file,
+    evaluate_output_policy,
 )
+from trader_jev.models import Action, Direction
 
 
 def _case(case_id: str = "direction") -> ExperimentCase:
@@ -83,6 +88,41 @@ def test_input_profiles_make_closed_loop_requirement_explicit() -> None:
     assert not JevPredictionTarget.BARRIER_OUTCOME_5M.supported_by_current_question_set
 
 
+def test_direction_gate_accepts_probability_and_margin_variants() -> None:
+    decision = JevDecision(
+        action=Action.LONG,
+        direction_5m=Direction.UP,
+        p_up=Decimal("0.65"),
+        p_flat=Decimal("0.20"),
+        p_down=Decimal("0.15"),
+    )
+    probability_only = JevOutputPolicy(
+        kind=OutputPolicyKind.DIRECTION_GATE,
+        thresholds=ThresholdPolicy(min_direction_probability=Decimal("0.60")),
+        accept_actions=(Action.LONG,),
+    )
+    margin_only = JevOutputPolicy(
+        kind=OutputPolicyKind.DIRECTION_GATE,
+        thresholds=ThresholdPolicy(min_direction_margin=Decimal("0.40")),
+        accept_actions=(Action.LONG,),
+    )
+
+    assert evaluate_output_policy(decision, Action.LONG, probability_only).accepted
+    assert evaluate_output_policy(decision, Action.LONG, margin_only).accepted
+
+    rejected = evaluate_output_policy(
+        decision,
+        Action.LONG,
+        JevOutputPolicy(
+            kind=OutputPolicyKind.DIRECTION_GATE,
+            thresholds=ThresholdPolicy(min_direction_margin=Decimal("0.60")),
+            accept_actions=(Action.LONG,),
+        ),
+    )
+    assert not rejected.accepted
+    assert rejected.reason_code == "DIRECTION_MARGIN_REJECTED"
+
+
 def test_plan_expands_every_enabled_case_split_and_replicate() -> None:
     runs = _plan().runs()
 
@@ -91,6 +131,30 @@ def test_plan_expands_every_enabled_case_split_and_replicate() -> None:
     assert {run.split_id for run in runs} == {"discovery", "validation"}
     assert {run.replicate for run in runs} == {1, 2}
     assert len({run.config_hash for run in runs}) == len(runs)
+
+
+def test_plan_expands_enabled_candidates_and_records_operating_parameters() -> None:
+    plan = _plan().model_copy(
+        update={
+            "candidates": (
+                ExperimentCandidate(candidate_id="baseline"),
+                ExperimentCandidate(candidate_id="disabled", enabled=False),
+                ExperimentCandidate(
+                    candidate_id="wide-stop",
+                    stop_atr_multiple=Decimal("1.5"),
+                ),
+            )
+        }
+    )
+
+    runs = plan.runs()
+
+    assert len(runs) == 2 * 2 * 2 * 2
+    assert {run.config["candidate"]["candidate_id"] for run in runs} == {
+        "baseline",
+        "wide-stop",
+    }
+    assert all("operations" in run.config for run in runs)
 
 
 def test_holdout_must_be_reserved() -> None:
@@ -207,6 +271,67 @@ def test_stale_worker_is_failed_and_requeued() -> None:
         assert registry.attempts(lease.run.run_id)[0]["error_code"] == "STALE_WORKER"
 
 
+def test_registry_enforces_daily_and_concurrent_limits() -> None:
+    plan = _plan().model_copy(
+        update={
+            "operations": ExperimentOperations(
+                daily_run_limit=1,
+                max_concurrent_runs=1,
+                budget_timezone="America/New_York",
+            )
+        }
+    )
+    now = datetime(2026, 9, 23, 14, 0, tzinfo=UTC)
+
+    with ExperimentRegistry(":memory:") as registry:
+        registry.register_plan(plan)
+        first = registry.claim_next(
+            worker_id="worker-1",
+            plan_id=plan.plan_id,
+            max_concurrent_runs=1,
+            daily_run_limit=1,
+            budget_timezone="America/New_York",
+            now=now,
+        )
+        assert first is not None
+        assert (
+            registry.claim_next(
+                worker_id="worker-2",
+                plan_id=plan.plan_id,
+                max_concurrent_runs=1,
+                daily_run_limit=1,
+                budget_timezone="America/New_York",
+                now=now,
+            )
+            is None
+        )
+
+        status = registry.budget_status(
+            plan_id=plan.plan_id,
+            daily_run_limit=1,
+            max_concurrent_runs=1,
+            budget_timezone="America/New_York",
+            now=now,
+        )
+        assert status.daily_started == 1
+        assert status.running == 1
+        assert status.remaining_today == 0
+        assert status.available_concurrency == 0
+
+        registry.succeed(first)
+        assert (
+            registry.claim_next(
+                worker_id="worker-3",
+                plan_id=plan.plan_id,
+                max_concurrent_runs=1,
+                daily_run_limit=1,
+                budget_timezone="America/New_York",
+                now=now,
+            )
+            is None
+        )
+
+
 def test_skipped_run_retains_reason() -> None:
     plan = _plan()
     with ExperimentRegistry(":memory:") as registry:
@@ -226,3 +351,15 @@ def test_repository_plan_is_loadable_and_contains_comparison_cases() -> None:
     assert len(plan.cases) == 10
     assert len(plan.runs()) == 20
     assert any(case.requires_custom_question_set for case in plan.cases)
+
+
+def test_forward_paper_plan_records_initial_candidates_and_budget() -> None:
+    plan_path = Path(__file__).parents[1] / "configs" / "jev-forward-paper-plan.yaml"
+    plan = ExperimentPlan.from_yaml(plan_path)
+
+    assert plan.operations.daily_run_limit == 2
+    assert plan.operations.max_concurrent_runs == 2
+    assert len(plan.candidates) == 7
+    assert sum(candidate.enabled for candidate in plan.candidates) == 5
+    assert len(plan.runs()) == 3 * 5 * 5
+    assert {candidate.prediction_horizon_minutes for candidate in plan.candidates[:5]} == {5}

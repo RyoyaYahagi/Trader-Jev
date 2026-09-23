@@ -29,8 +29,10 @@ moomoo APIは市場データ取得に限って使用します。注文・口座�
 
 ## Initial scope
 
-- Prediction horizon: 3〜5分
-- Decision interval: 15秒
+- Prediction horizon: 5分（15分・30分は質問セット整備後のバックログ）
+- Decision interval: 30秒（探索候補は15秒 / 30秒 / 60秒）
+- Initial exit: ATR(14) × 1.0 stop、1.5R take-profit、最大保有15分
+- Autonomous Forward Paper: 新規runは1日2件、同時実行は最大2件
 - Initial universe: 固定10銘柄
 - Markets: Japan / US を研究対象とする
 - Direction model: LONG / SHORT / HOLD
@@ -38,6 +40,8 @@ moomoo APIは市場データ取得に限って使用します。注文・口座�
 - Realtime market data: optional read-only `MoomooMarketDataAdapter`
 - Live trading: future milestone（現在は未実装）
 - Main validation: Historical Replay と Paper Trading
+
+初期値は最適値ではなく、`configs/jev-forward-paper-plan.yaml` に登録した比較候補の起点です。SQLite台帳へ候補・試行・失敗・結果を保存し、Jevの入力・正規化済み出力・監査情報も各Paper runのartifactとして残します。現在の自動実行は読み取り専用の市場データ + `PaperBroker` に限ります。
 
 ## Documents
 

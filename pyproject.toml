@@ -17,6 +17,7 @@ dependencies = [
     "numpy>=1.24,<3",
     "polars>=1.20,<2",
     "pydantic>=2.8,<3",
+    "PyYAML>=6.0,<7",
 ]
 
 [project.scripts]
@@ -24,6 +25,7 @@ trader-jev-paper = "trader_jev.cli:main"
 trader-jev-train = "trader_jev.ml_cli:main"
 trader-jev-forward-paper = "trader_jev.forward_paper:main"
 trader-jev-dashboard = "trader_jev.dashboard_server:main"
+trader-jev-experiment = "trader_jev.experiment_cli:main"
 
 [dependency-groups]
 dev = [

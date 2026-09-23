@@ -14,6 +14,11 @@ from uuid import UUID, uuid4
 from pydantic import Field, model_validator
 
 from trader_jev.clock import SystemClock
+from trader_jev.experiments import (
+    JevInputProfile,
+    JevOutputPolicy,
+    evaluate_output_policy,
+)
 from trader_jev.interfaces import Clock, DecisionModel
 from trader_jev.models import (
     Action,
@@ -246,9 +251,13 @@ class JevDecisionModel(DecisionModel):
         adapter: JevDecisionAdapter,
         *,
         strategy_id: str = "jev-only",
+        input_profile: JevInputProfile | None = None,
+        output_policy: JevOutputPolicy | None = None,
     ) -> None:
         self.adapter = adapter
         self.strategy_id = strategy_id
+        self.input_profile = input_profile
+        self.output_policy = output_policy
 
     async def decide(
         self,
@@ -259,6 +268,7 @@ class JevDecisionModel(DecisionModel):
             snapshot,
             prediction=prediction,
             input_schema_version=self.adapter.config.input_schema_version,
+            input_profile=self.input_profile,
         )
         try:
             result = await self.adapter.decide(request)
@@ -273,8 +283,22 @@ class JevDecisionModel(DecisionModel):
                 metadata={"request_id": str(request.request_id)},
             )
         decision = result.decision
-        action = Action.HOLD if decision.news_invalidates_signal else decision.action
-        reason = "news invalidated signal" if decision.news_invalidates_signal else "Jev decision"
+        if self.output_policy is None:
+            action = Action.HOLD if decision.news_invalidates_signal else decision.action
+            if decision.news_invalidates_signal:
+                reason = "news invalidated signal"
+            else:
+                reason = "Jev decision"
+            policy_metadata: dict[str, Any] = {}
+        else:
+            evaluation = evaluate_output_policy(decision, decision.action, self.output_policy)
+            action = evaluation.action
+            reason = evaluation.reason
+            policy_metadata = {
+                "output_policy": self.output_policy.model_dump(mode="json"),
+                "output_policy_accepted": evaluation.accepted,
+                "output_policy_reason_code": evaluation.reason_code,
+            }
         return TradeIntent(
             snapshot_id=snapshot.snapshot_id,
             instrument=snapshot.instrument,
@@ -286,6 +310,9 @@ class JevDecisionModel(DecisionModel):
             created_at=snapshot.as_of,
             metadata={
                 "request_id": str(request.request_id),
+                "input_profile": (
+                    self.input_profile.value if self.input_profile is not None else None
+                ),
                 "direction_5m": decision.direction_5m.value,
                 "regime": decision.regime.value,
                 "setup_quality": str(decision.setup_quality),
@@ -298,6 +325,7 @@ class JevDecisionModel(DecisionModel):
                 "input_schema_version": decision.input_schema_version,
                 "latency_ms": decision.latency_ms,
                 "jev_audit": result.audit.model_dump(mode="json"),
+                **policy_metadata,
             },
         )
 
@@ -372,20 +400,38 @@ def build_jev_request(
     *,
     prediction: Any = None,
     input_schema_version: str = "1.0",
+    input_profile: JevInputProfile | None = None,
 ) -> JevRequest:
     """Build the compact Jev payload from one immutable snapshot."""
 
-    payload: dict[str, Any] = {
-        "event_time": snapshot.event_time.isoformat(),
-        "as_of": snapshot.as_of.isoformat(),
+    sections: dict[str, Any] = {
         "technical": dict(snapshot.technical),
         "orderbook": dict(snapshot.orderbook),
         "orderflow": dict(snapshot.orderflow),
         "supply_demand": dict(snapshot.supply_demand),
         "short_history_summary": dict(snapshot.short_history_summary),
+        "news": dict(snapshot.news),
+        "ml": dict(snapshot.ml),
         "portfolio": dict(snapshot.portfolio),
         "data_quality": snapshot.data_quality.model_dump(mode="json"),
     }
+    legacy_sections = (
+        "technical",
+        "orderbook",
+        "orderflow",
+        "supply_demand",
+        "short_history_summary",
+        "portfolio",
+        "data_quality",
+    )
+    selected_sections = legacy_sections if input_profile is None else input_profile.payload_sections
+    payload: dict[str, Any] = {
+        "event_time": snapshot.event_time.isoformat(),
+        "as_of": snapshot.as_of.isoformat(),
+        **{name: sections[name] for name in selected_sections},
+    }
+    if input_profile is not None:
+        payload["input_profile"] = input_profile.value
     if prediction is not None:
         payload["prediction"] = (
             prediction.model_dump(mode="json") if hasattr(prediction, "model_dump") else prediction

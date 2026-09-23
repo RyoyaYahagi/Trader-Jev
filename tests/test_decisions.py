@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Mapping
+from decimal import Decimal
 from typing import Any
 
 import pytest
@@ -16,6 +17,12 @@ from trader_jev.decision import (
     build_jev_request,
 )
 from trader_jev.execution import PaperBroker
+from trader_jev.experiments import (
+    JevInputProfile,
+    JevOutputPolicy,
+    OutputPolicyKind,
+    ThresholdPolicy,
+)
 from trader_jev.features import InMemoryFeatureEngine
 from trader_jev.models import Action, DecisionSnapshot, Direction, QuoteEvent, Regime, TradeIntent
 from trader_jev.pipeline import TradingPipeline
@@ -97,6 +104,49 @@ async def test_jev_model_returns_non_executable_intent_and_failure_is_hold(
     bad_intent = await JevDecisionModel(bad_adapter).decide(snapshot)
     assert bad_intent.action is Action.HOLD
     assert bad_intent.metadata["failure_code"] == "JEV_MALFORMED_RESPONSE"
+
+
+def test_jev_request_input_profile_selects_snapshot_sections(quote: QuoteEvent) -> None:
+    snapshot = snapshot_for(quote).model_copy(
+        update={"news": {"headline": "test"}, "ml": {"p_up": "0.8"}}
+    )
+
+    technical = build_jev_request(snapshot, input_profile=JevInputProfile.TECHNICAL_ONLY)
+    full = build_jev_request(snapshot, input_profile=JevInputProfile.FULL_CONTEXT)
+
+    assert "orderbook" not in technical.payload
+    assert "portfolio" not in technical.payload
+    assert full.payload["news"] == {"headline": "test"}
+    assert full.payload["ml"] == {"p_up": "0.8"}
+    assert full.payload["input_profile"] == JevInputProfile.FULL_CONTEXT.value
+
+
+@pytest.mark.asyncio
+async def test_jev_output_policy_applies_confidence_threshold(quote: QuoteEvent) -> None:
+    snapshot = snapshot_for(quote)
+    adapter = JevDecisionAdapter(
+        StaticJevClient(
+            {
+                "action": "LONG",
+                "direction_5m": "UP",
+                "probabilities": {"up": 0.7, "flat": 0.2, "down": 0.1},
+            }
+        ),
+        clock=FixedClock(NOW),
+    )
+    model = JevDecisionModel(
+        adapter,
+        output_policy=JevOutputPolicy(
+            kind=OutputPolicyKind.CONFIDENCE_THRESHOLD,
+            thresholds=ThresholdPolicy(min_confidence=Decimal("0.8")),
+        ),
+    )
+
+    intent = await model.decide(snapshot)
+
+    assert intent.action is Action.HOLD
+    assert intent.metadata["output_policy_reason_code"] == "THRESHOLD_REJECTED"
+    assert intent.metadata["output_policy_accepted"] is False
 
 
 @pytest.mark.asyncio

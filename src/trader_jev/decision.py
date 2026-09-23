@@ -55,7 +55,6 @@ class JevDecision(DomainModel):
     confidence: Decimal = Field(default=Decimal("0"), ge=Decimal("0"), le=Decimal("1"))
     top_probability: Decimal | None = Field(default=None, ge=Decimal("0"), le=Decimal("1"))
     top_two_margin: Decimal | None = None
-    news_invalidates_signal: bool = False
     model_version: str = Field(default="jev", min_length=1)
     input_schema_version: str = Field(default="1.0", min_length=1)
     latency_ms: int | None = Field(default=None, ge=0)
@@ -295,11 +294,8 @@ class JevDecisionModel(DecisionModel):
             )
         decision = result.decision
         if self.output_policy is None:
-            action = Action.HOLD if decision.news_invalidates_signal else decision.action
-            if decision.news_invalidates_signal:
-                reason = "news invalidated signal"
-            else:
-                reason = "Jev decision"
+            action = decision.action
+            reason = "Jev decision"
             policy_metadata: dict[str, Any] = {}
         else:
             evaluation = evaluate_output_policy(decision, decision.action, self.output_policy)

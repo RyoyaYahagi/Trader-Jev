@@ -89,17 +89,6 @@ cases:
     implementation: OUTPUT_POLICY_ADAPTER
     tags: [entry, setup-quality]
 
-  - case_id: jev-news-gate
-    name: News invalidation as a signal veto
-    description: Use news invalidation to reject a candidate while keeping the direction model fixed.
-    input_profile: NEWS_AWARE
-    prediction_target: NEWS_INVALIDATION
-    decision_use: ENTRY_GATE
-    output_policy:
-      kind: NEWS_INVALIDATION_GATE
-    implementation: OUTPUT_POLICY_ADAPTER
-    tags: [entry, news]
-
   - case_id: jev-ml-input
     name: ML prediction supplied as Jev context
     description: Add the point-in-time ML prediction to the same market context and compare the gate.

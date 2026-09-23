@@ -95,7 +95,6 @@ class JevPredictionTarget(StrEnum):
     DIRECTION_5M = "DIRECTION_5M"
     REGIME = "REGIME"
     SETUP_QUALITY = "SETUP_QUALITY"
-    NEWS_INVALIDATION = "NEWS_INVALIDATION"
     BARRIER_OUTCOME_5M = "BARRIER_OUTCOME_5M"
     EXIT_THESIS_5M = "EXIT_THESIS_5M"
 
@@ -108,7 +107,6 @@ class JevPredictionTarget(StrEnum):
             JevPredictionTarget.DIRECTION_5M,
             JevPredictionTarget.REGIME,
             JevPredictionTarget.SETUP_QUALITY,
-            JevPredictionTarget.NEWS_INVALIDATION,
         }
 
 
@@ -132,7 +130,6 @@ class OutputPolicyKind(StrEnum):
     TOP_TWO_MARGIN = "TOP_TWO_MARGIN"
     DIRECTION_GATE = "DIRECTION_GATE"
     SETUP_QUALITY_GATE = "SETUP_QUALITY_GATE"
-    NEWS_INVALIDATION_GATE = "NEWS_INVALIDATION_GATE"
     RULE_AGREEMENT = "RULE_AGREEMENT"
     TEMPORAL_CONFIRMATION = "TEMPORAL_CONFIRMATION"
     ENTRY_EXIT_SPLIT = "ENTRY_EXIT_SPLIT"
@@ -250,7 +247,6 @@ class ThresholdPolicy(DomainModel):
     )
     min_direction_margin: Decimal | None = Field(default=None, ge=Decimal("0"), le=Decimal("1"))
     min_setup_quality: Decimal | None = Field(default=None, ge=Decimal("0"), le=Decimal("1"))
-    allow_news_invalidated: bool = False
     min_expected_return_bps: Decimal | None = None
     required_consecutive_decisions: int = Field(default=1, ge=1)
 
@@ -326,12 +322,6 @@ def evaluate_output_policy(
         return reject("ACTION_NOT_ACCEPTED", "Jev action is outside accept_actions")
 
     thresholds = policy.thresholds
-    if (
-        getattr(decision, "news_invalidates_signal", False)
-        and not thresholds.allow_news_invalidated
-    ):
-        return reject("NEWS_INVALIDATED", "Jev marked the signal as invalidated by news")
-
     observed: Decimal | None = None
     threshold: Decimal | None = None
     if policy.kind is OutputPolicyKind.CONFIDENCE_THRESHOLD:

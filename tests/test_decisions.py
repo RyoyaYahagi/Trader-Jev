@@ -152,7 +152,7 @@ async def test_jev_output_policy_applies_confidence_threshold(quote: QuoteEvent)
 
 
 @pytest.mark.asyncio
-async def test_timeout_and_news_invalidation_fail_closed(quote: QuoteEvent) -> None:
+async def test_timeout_fails_closed(quote: QuoteEvent) -> None:
     snapshot = snapshot_for(quote)
     timeout_adapter = JevDecisionAdapter(
         SlowJevClient(),
@@ -162,21 +162,6 @@ async def test_timeout_and_news_invalidation_fail_closed(quote: QuoteEvent) -> N
     intent = await JevDecisionModel(timeout_adapter).decide(snapshot)
     assert intent.action is Action.HOLD
     assert intent.metadata["failure_code"] == "JEV_TIMEOUT"
-
-    news_adapter = JevDecisionAdapter(
-        StaticJevClient(
-            {
-                "action": "LONG",
-                "direction_5m": "UP",
-                "news_invalidates_signal": True,
-            }
-        ),
-        clock=FixedClock(NOW),
-    )
-    news_intent = await JevDecisionModel(news_adapter).decide(snapshot)
-    assert news_intent.action is Action.HOLD
-    assert news_intent.metadata["direction_5m"] == "UP"
-
 
 @pytest.mark.asyncio
 async def test_jev_failure_cannot_reach_paper_broker(quote: QuoteEvent) -> None:

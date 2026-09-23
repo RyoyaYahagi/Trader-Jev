@@ -353,8 +353,8 @@ def test_repository_plan_is_loadable_and_contains_comparison_cases() -> None:
     plan = ExperimentPlan.from_yaml(plan_path)
 
     assert plan.plan_id == "jev-input-output-v1"
-    assert len(plan.cases) == 10
-    assert len(plan.runs()) == 20
+    assert len(plan.cases) == 9
+    assert len(plan.runs()) == 18
     assert any(case.requires_custom_question_set for case in plan.cases)
 
 

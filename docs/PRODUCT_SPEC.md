@@ -113,7 +113,6 @@ Jevへは最新特徴量 + compact short history summaryを渡す。
 - regime
 - setup_quality
 - probabilities / confidence
-- optional news_invalidates_signal
 
 初期の方向ゲートは `p_up >= 0.60` かつ `p_up - max(p_flat, p_down) >= 0.10` とする。探索では `0.60/0.20`、`0.70/0.10` も同じデータ・同じ出口条件で比較し、いずれも最終採用値とはみなさない。確率は利益確率そのものではないため、確率帯ごとの実現結果、取引数、手数料控除後損益を記録する。
 

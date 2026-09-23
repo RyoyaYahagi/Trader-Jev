@@ -300,10 +300,6 @@ def _typesafe_questions() -> dict[str, dict[str, Any]]:
                 "1.0: exceptionally strong setup",
             ],
         },
-        "news_invalidates_signal": {
-            "type": "noul",
-            "instructions": "Does current news invalidate the proposed trading signal?",
-        },
     }
 
 
@@ -320,7 +316,6 @@ def _normalize_typesafe_response(
     direction_answer = _answer(answers, "direction_5m")
     regime_answer = _answer(answers, "regime")
     setup_answer = _answer(answers, "setup_quality")
-    news_answer = _answer(answers, "news_invalidates_signal")
 
     direction_probabilities = _probabilities(direction_answer, "direction_5m")
     normalized: dict[str, Any] = {
@@ -328,9 +323,6 @@ def _normalize_typesafe_response(
         "direction_5m": _choice(direction_answer, "direction_5m"),
         "regime": _choice(regime_answer, "regime"),
         "setup_quality": _score_quality(setup_answer),
-        "news_invalidates_signal": (
-            _bounded_decimal(news_answer.get("noul"), "news_invalidates_signal") >= Decimal("0.5")
-        ),
         "model_version": str(response.get("model") or default_model),
         "input_schema_version": request.input_schema_version,
     }

@@ -147,7 +147,6 @@ async def test_client_posts_typed_request_with_secret_in_header_only(
                             "probabilities": {"0": 0.0, "1": 0.5, "2": 0.5},
                             "confidence": 0.8,
                         },
-                        "news_invalidates_signal": {"type": "noul", "noul": 0.1},
                     },
                     "usage": {"input_tokens": 10, "output_tokens": 20},
                 }
@@ -177,7 +176,7 @@ async def test_client_posts_typed_request_with_secret_in_header_only(
     assert sent_body["model"] == "jev-latest"
     assert sent_body["questions"]["action"]["type"] == "choice"
     assert sent_body["questions"]["setup_quality"]["type"] == "score"
-    assert sent_body["questions"]["news_invalidates_signal"]["type"] == "noul"
+    assert "news_invalidates_signal" not in sent_body["questions"]
     assert isinstance(result, Mapping)
     assert result["action"] == "LONG"
     assert result["direction_5m"] == "UP"

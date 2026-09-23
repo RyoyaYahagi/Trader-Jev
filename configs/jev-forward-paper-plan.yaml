@@ -1,7 +1,7 @@
 schema_version: "1"
-plan_id: jev-forward-paper-v1
+plan_id: jev-forward-paper-v2-no-news-ml
 name: Autonomous Jev Forward Paper
-purpose: Accumulate independent Paper trading sessions for long-only Jev entry policies.
+purpose: Accumulate independent Paper trading sessions for Jev entry policies using technical-only and microstructure inputs; news and ML are not active in this plan.
 replicates: 5
 context:
   code_version: REPLACE_WITH_GIT_COMMIT
@@ -101,9 +101,51 @@ candidates:
     take_profit_r_multiple: "1.5"
     max_holding_seconds: 3600
 cases:
-  - case_id: jev-long-p60-m10
-    name: Long entry with 60% UP probability and 10% margin
-    description: Accept a long entry only when p_up and its directional margin pass the gate.
+  - case_id: jev-technical-p60-m10
+    name: Technical-only input with 60% UP probability and 10% margin
+    description: Use technical, short-history, and data-quality sections only; accept a long entry when p_up and its directional margin pass the gate.
+    input_profile: TECHNICAL_ONLY
+    prediction_target: DIRECTION_5M
+    decision_use: ENTRY_GATE
+    output_policy:
+      kind: DIRECTION_GATE
+      thresholds:
+        min_direction_probability: "0.60"
+        min_direction_margin: "0.10"
+      accept_actions: [LONG]
+    implementation: OUTPUT_POLICY_ADAPTER
+    tags: [forward-paper, long-only, technical-only, baseline]
+  - case_id: jev-technical-p60-m20
+    name: Technical-only input with 60% UP probability and 20% margin
+    description: Use no news or ML data and require a larger separation from FLAT and DOWN before entering.
+    input_profile: TECHNICAL_ONLY
+    prediction_target: DIRECTION_5M
+    decision_use: ENTRY_GATE
+    output_policy:
+      kind: DIRECTION_GATE
+      thresholds:
+        min_direction_probability: "0.60"
+        min_direction_margin: "0.20"
+      accept_actions: [LONG]
+    implementation: OUTPUT_POLICY_ADAPTER
+    tags: [forward-paper, long-only, technical-only, margin]
+  - case_id: jev-technical-p70-m10
+    name: Technical-only input with 70% UP probability and 10% margin
+    description: Use no news or ML data and require stronger UP probability while retaining the baseline margin.
+    input_profile: TECHNICAL_ONLY
+    prediction_target: DIRECTION_5M
+    decision_use: ENTRY_GATE
+    output_policy:
+      kind: DIRECTION_GATE
+      thresholds:
+        min_direction_probability: "0.70"
+        min_direction_margin: "0.10"
+      accept_actions: [LONG]
+    implementation: OUTPUT_POLICY_ADAPTER
+    tags: [forward-paper, long-only, technical-only, probability]
+  - case_id: jev-microstructure-p60-m10
+    name: Microstructure input with 60% UP probability and 10% margin
+    description: Add orderbook, orderflow, and supply-demand sections while keeping the baseline gate.
     input_profile: MICROSTRUCTURE
     prediction_target: DIRECTION_5M
     decision_use: ENTRY_GATE
@@ -114,10 +156,10 @@ cases:
         min_direction_margin: "0.10"
       accept_actions: [LONG]
     implementation: OUTPUT_POLICY_ADAPTER
-    tags: [forward-paper, long-only, baseline]
-  - case_id: jev-long-p60-m20
-    name: Long entry with 60% UP probability and 20% margin
-    description: Require a larger separation from FLAT and DOWN before entering.
+    tags: [forward-paper, long-only, microstructure, baseline]
+  - case_id: jev-microstructure-p60-m20
+    name: Microstructure input with 60% UP probability and 20% margin
+    description: Add orderbook, orderflow, and supply-demand sections and require a larger separation from FLAT and DOWN before entering.
     input_profile: MICROSTRUCTURE
     prediction_target: DIRECTION_5M
     decision_use: ENTRY_GATE
@@ -128,10 +170,10 @@ cases:
         min_direction_margin: "0.20"
       accept_actions: [LONG]
     implementation: OUTPUT_POLICY_ADAPTER
-    tags: [forward-paper, long-only, margin]
-  - case_id: jev-long-p70-m10
-    name: Long entry with 70% UP probability and 10% margin
-    description: Require stronger UP probability while retaining the baseline margin.
+    tags: [forward-paper, long-only, microstructure, margin]
+  - case_id: jev-microstructure-p70-m10
+    name: Microstructure input with 70% UP probability and 10% margin
+    description: Add orderbook, orderflow, and supply-demand sections and require stronger UP probability while retaining the baseline margin.
     input_profile: MICROSTRUCTURE
     prediction_target: DIRECTION_5M
     decision_use: ENTRY_GATE
@@ -142,7 +184,7 @@ cases:
         min_direction_margin: "0.10"
       accept_actions: [LONG]
     implementation: OUTPUT_POLICY_ADAPTER
-    tags: [forward-paper, long-only, probability]
+    tags: [forward-paper, long-only, microstructure, probability]
 splits:
   - split_id: forward-paper-session
     kind: FORWARD_PAPER

@@ -32,6 +32,7 @@ moomoo APIは市場データ取得に限って使用します。注文・口座�
 - Prediction horizon: 5分（15分・30分は質問セット整備後のバックログ）
 - Decision interval: 30秒（探索候補は15秒 / 30秒 / 60秒）
 - Initial exit: ATR(14) × 1.0 stop、1.5R take-profit、最大保有15分
+- Initial Jev inputs: `TECHNICAL_ONLY` と `MICROSTRUCTURE`（ニュース／MLは初期Forward Paperでは未使用）
 - Autonomous Forward Paper: 新規runは1日2件、同時実行は最大2件
 - Initial universe: 固定10銘柄
 - Markets: Japan / US を研究対象とする

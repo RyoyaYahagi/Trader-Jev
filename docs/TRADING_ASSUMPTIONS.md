@@ -103,11 +103,12 @@ included in this execution fee model.
 Input:
 - latest features
 - short history summary
-- optional ML
-- optional NewsState
+- technical-only or microstructure profile during the initial Forward Paper phase
 - virtual portfolio state
 
 初期のJev方向ゲートは `p_up >= 0.60` かつ `p_up - max(p_flat, p_down) >= 0.10`。比較候補として `0.60/0.20` と `0.70/0.10` を登録する。これは暫定的なPaper探索値であり、校正・取引数・手数料控除後PnLを確認してから採用可否を決める。
+
+初期Forward Paperでは、`TECHNICAL_ONLY`（テクニカル・短期履歴・データ品質）と `MICROSTRUCTURE`（板・約定方向・需給を追加）のみを使用する。ニュースとMLは比較カタログに候補を残すが、最初の自律実行には含めない。
 
 ## Autonomous Paper experiment operations
 
@@ -116,7 +117,7 @@ Input:
 - 予算日: `America/New_York`
 - 失敗runの再試行は、既に開始済みのrunの再試行として扱い、新規run枠を追加消費しない
 - 自動実行は読み取り専用moomoo quote + `PaperBroker` のみ。取引・口座APIは使わない
-- 75 run（3 threshold cases × 5 enabled candidates × 5 replicates）を上限2件/日で進めるため、全候補を一巡する最短目安は38取引日
+- 150 run（2 input profiles × 3 threshold cases × 5 enabled candidates × 5 replicates）を上限2件/日で進めるため、全候補を一巡する最短目安は75取引日
 
 ## ML
 

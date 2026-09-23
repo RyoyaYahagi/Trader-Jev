@@ -102,6 +102,8 @@ Jevへは最新特徴量 + compact short history summaryを渡す。
 - virtual portfolio state
 - data quality
 
+初期の自律Forward Paperでは、ニュースとMLを含まない `TECHNICAL_ONLY` と `MICROSTRUCTURE` の2入力プロファイルだけを使用する。ニュース・ML・保有状態を使う入力は、比較カタログ上の後段候補として扱う。
+
 長い生時系列を毎回渡さない。
 
 ## 8. Jev decision schema

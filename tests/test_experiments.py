@@ -357,9 +357,20 @@ def test_forward_paper_plan_records_initial_candidates_and_budget() -> None:
     plan_path = Path(__file__).parents[1] / "configs" / "jev-forward-paper-plan.yaml"
     plan = ExperimentPlan.from_yaml(plan_path)
 
+    assert plan.plan_id == "jev-forward-paper-v2-no-news-ml"
     assert plan.operations.daily_run_limit == 2
     assert plan.operations.max_concurrent_runs == 2
     assert len(plan.candidates) == 7
     assert sum(candidate.enabled for candidate in plan.candidates) == 5
-    assert len(plan.runs()) == 3 * 5 * 5
+    assert len(plan.cases) == 6
+    assert {case.input_profile for case in plan.cases if case.enabled} == {
+        JevInputProfile.TECHNICAL_ONLY,
+        JevInputProfile.MICROSTRUCTURE,
+    }
+    assert all(
+        case.input_profile not in {JevInputProfile.NEWS_AWARE, JevInputProfile.ML_AWARE}
+        for case in plan.cases
+        if case.enabled
+    )
+    assert len(plan.runs()) == 2 * 3 * 5 * 5
     assert {candidate.prediction_horizon_minutes for candidate in plan.candidates[:5]} == {5}

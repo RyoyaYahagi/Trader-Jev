@@ -40,11 +40,18 @@
 | 項目 | 初期値 | 探索候補 |
 | --- | --- | --- |
 | Jevの予測対象 | 5分方向 `UP / FLAT / DOWN` | 15分・30分は質問セット追加後 |
-| Jev入力 | 板・約定・需給を含む `MICROSTRUCTURE` | テクニカルのみ、ニュース、ML、保有状態、全コンテキスト |
+| Jev入力 | `TECHNICAL_ONLY` と `MICROSTRUCTURE` | ニュース、ML、保有状態、全コンテキストは後段 |
 | 採用条件 | `p_up >= 0.60` かつ方向マージン `>= 0.10` | `0.60/0.20`、`0.70/0.10` |
 | 判断間隔 | 30秒 | 15秒、60秒 |
 | 出口 | ATR(14) stop 1.0、take-profit 1.5R | stop 1.5 ATR、最大保有30分 |
 | 最大保有時間 | 15分 | 30分 |
+
+現在の自律Forward Paperで実行する入力は、ニュースとMLを含まない次の2種類だけです。
+
+- `TECHNICAL_ONLY`: テクニカル、短期履歴、データ品質
+- `MICROSTRUCTURE`: 上記に板、約定方向、需給を追加
+
+`NEWS_AWARE`、`ML_AWARE`、`PORTFOLIO_AWARE`、`FULL_CONTEXT` は比較カタログまたは将来候補として定義できますが、現在のForward Paper計画には含めません。`configs/jev-experiment-plan.yaml` は全候補を整理するカタログであり、自律workerが実行する計画ではありません。
 
 `p_up` は上昇方向に限った条件であり、利益になる確率を直接表すものではありません。各runでJevの入力・回答・採用理由、RiskEngineの承認／拒否、仮想約定、手数料控除後PnLを同じrun_idへ結び付けます。LONG専用ケースでも、`SHORT` は既存LONGを閉じる出口表現として利用でき、SHORT新規エントリーは作りません。
 
@@ -84,7 +91,9 @@
 
 ## 自律Forward Paperの運用
 
-`jev-forward-paper-v1` は、3つの方向ゲートケース × 5つの有効candidate × 5反復、合計75 runを登録します。15分・30分予測の2候補は質問セット未対応のため無効候補として計画に残し、runへは展開しません。
+`jev-forward-paper-v2-no-news-ml` は、2つの入力プロファイル × 3つの方向ゲートケース × 5つの有効candidate × 5反復、合計150 runを登録します。入力プロファイルと閾値の全組み合わせを同じ運用候補で比較します。15分・30分予測の2候補は質問セット未対応のため無効候補として計画に残し、runへは展開しません。
+
+計画内容を変更した場合に既存のSQLite履歴を上書きしないよう、前版の `jev-forward-paper-v1` とは別の `plan_id` を使用します。
 
 運用上の初期値は次のとおりです。
 
@@ -96,7 +105,7 @@
 - 失敗・タイムアウト: `FAILED` として理由・メトリクス・artifactを保存し、再試行可能
 - stale worker: heartbeatを監視し、復旧時は元のattemptを失敗として残して同じrunを再キュー
 
-日次上限は `started_at` がその予算日に初めて設定されたrun行を数えます。再試行は同じrun行のattempt追加なので新規枠を消費しません。75 runを一巡する最短目安は、失敗・休場を除き38取引日です。これは過学習を抑え、各候補に同程度の実時間を与えるための初期運用値です。
+日次上限は `started_at` がその予算日に初めて設定されたrun行を数えます。再試行は同じrun行のattempt追加なので新規枠を消費しません。150 runを一巡する最短目安は、失敗・休場を除き75取引日です。これは入力・閾値・運用候補の比較を揃え、過学習を抑えるための初期運用値です。
 
 登録と自動実行:
 
@@ -107,11 +116,11 @@ uv run trader-jev-experiment register \
 
 uv run trader-jev-experiment budget \
   --db var/experiments.sqlite \
-  --plan-id jev-forward-paper-v1
+  --plan-id jev-forward-paper-v2-no-news-ml
 
 uv run trader-jev-experiment-worker \
   --db var/experiments.sqlite \
-  --plan-id jev-forward-paper-v1 \
+  --plan-id jev-forward-paper-v2-no-news-ml \
   --worker-id paper-01 \
   --env-file .env \
   --report-dir var/paper-experiments \

@@ -12,6 +12,7 @@ import json
 import logging
 from collections.abc import Mapping, Sequence
 from datetime import UTC, date, datetime, timedelta
+from decimal import Decimal
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any, cast
@@ -78,6 +79,9 @@ class ReportStore:
             if loaded is None:
                 continue
             report_name, summary = loaded
+            total_fees = summary.portfolio.total_fees or sum(
+                (fill.fees for fill in summary.fill_events), Decimal("0")
+            )
             entries.append(
                 {
                     "name": report_name,
@@ -86,6 +90,7 @@ class ReportStore:
                     "finished_at": summary.finished_at.isoformat(),
                     "equity": str(summary.portfolio.equity or summary.portfolio.cash),
                     "daily_pnl": str(summary.portfolio.daily_pnl),
+                    "fees": str(total_fees),
                     "fills": summary.fills,
                     "positions": len(summary.portfolio.positions),
                     "open_orders": summary.portfolio.open_orders,
@@ -232,6 +237,8 @@ def dashboard_payload(name: str, summary: ForwardPaperSummary) -> dict[str, Any]
     fills = [_model_or_mapping(fill) for fill in summary.fill_events]
     order_intents = [_model_or_mapping(order) for order in summary.order_intents]
     order_events = [_model_or_mapping(event) for event in summary.order_events]
+    trade_records = [_model_or_mapping(trade) for trade in summary.trade_records]
+    total_fees = sum((fill.fees for fill in summary.fill_events), Decimal("0"))
     alerts: list[str] = []
     if portfolio.positions:
         alerts.append("未決済ポジションが残っています")
@@ -254,8 +261,14 @@ def dashboard_payload(name: str, summary: ForwardPaperSummary) -> dict[str, Any]
         "errors": list(summary.errors),
         "alerts": alerts,
         "portfolio": portfolio.model_dump(mode="json"),
+        "pnl": {
+            "gross_realized": str(portfolio.gross_realized_pnl),
+            "fees": str(total_fees),
+            "net_realized": str(portfolio.realized_pnl),
+        },
         "positions": positions,
         "fill_events": fills,
+        "trade_records": trade_records,
         "order_intents": order_intents,
         "order_events": order_events,
         "jev_usage": summary.jev_usage.model_dump(mode="json"),
@@ -506,6 +519,7 @@ DASHBOARD_HTML = """<!doctype html>
     <div class="card"><div class="label">日次損益 USD</div><div id="daily-pnl" class="value">—</div></div>
     <div class="card"><div class="label">実現損益 USD</div><div id="realized-pnl" class="value">—</div></div>
     <div class="card"><div class="label">含み損益 USD</div><div id="unrealized-pnl" class="value">—</div></div>
+    <div class="card"><div class="label">累計手数料 USD</div><div id="fees" class="value">—</div></div>
     <div class="card"><div class="label">仮想約定数</div><div id="fills" class="value">—</div></div>
     <div class="card"><div class="label">処理イベント数</div><div id="events" class="value">—</div></div>
   </section>
@@ -513,6 +527,7 @@ DASHBOARD_HTML = """<!doctype html>
     <section class="panel"><h2>ポジション</h2><div id="positions"></div></section>
     <section class="panel"><h2>実行状況</h2><div id="execution"></div></section>
     <section class="panel wide"><h2>Jev使用料金（全条件の合計）</h2><div id="jev-costs"></div><div class="note">Jevは判断モデルの呼出しです。単価が未設定の場合、トークン数だけを表示して金額を推定しません。</div></section>
+    <section class="panel wide"><h2>取引損益（手数料控除後）</h2><div id="trades-table"></div></section>
     <section class="panel wide"><h2>仮想約定履歴</h2><div id="fills-table"></div></section>
   </div>
 </main>
@@ -544,6 +559,9 @@ function render(data) {
   setValue('equity', money(p.equity || p.cash)); setValue('daily-pnl', signed(p.daily_pnl), pnl >= 0 ? 'positive' : 'negative');
   setValue('realized-pnl', signed(p.realized_pnl), Number(p.realized_pnl || 0) >= 0 ? 'positive' : 'negative');
   setValue('unrealized-pnl', signed(p.unrealized_pnl), Number(p.unrealized_pnl || 0) >= 0 ? 'positive' : 'negative');
+  const totalFees = (data.pnl || {}).fees || p.total_fees || '0';
+  const feeValue = Number(totalFees || 0);
+  setValue('fees', money(totalFees), feeValue === 0 ? '' : 'negative');
   setValue('fills', integer(data.fills)); setValue('events', integer(data.events_processed));
   const condition = data.capital_condition || {}; const conditionLabel = condition.label || '単一条件';
   const decisionLabel = condition.decision_label || 'ルール判定';
@@ -556,10 +574,12 @@ function render(data) {
   const positionRows = (data.positions || []).map((x) => [x.symbol, x.side, integer(x.quantity), money(x.average_price), money(x.current_price), [signed(x.unrealized_pnl), Number(x.unrealized_pnl) >= 0 ? 'positive' : 'negative']]);
   $('positions').replaceChildren(table(['銘柄', '方向', '数量', '平均価格', '現在価格', '含み損益'], positionRows));
   const jevUsage = data.jev_usage || {};
-  const executionRows = [['判断方式', condition.decision_label || 'ルール判定'], ['Jev呼出', integer(jevUsage.request_count)], ['判断回数', integer(data.decisions)], ['承認注文', integer(data.approved_orders)], ['リスク拒否', integer(data.risk_rejections)], ['HOLD', integer(data.holds)], ['未決済注文', integer(p.open_orders)], ['最大ドローダウン', money(p.drawdown)]];
+  const executionRows = [['判断方式', condition.decision_label || 'ルール判定'], ['Jev呼出', integer(jevUsage.request_count)], ['判断回数', integer(data.decisions)], ['承認注文', integer(data.approved_orders)], ['リスク拒否', integer(data.risk_rejections)], ['HOLD', integer(data.holds)], ['未決済注文', integer(p.open_orders)], ['手数料控除前実現損益', signed((data.pnl || {}).gross_realized)], ['累計手数料', money(totalFees)], ['手数料控除後実現損益', signed((data.pnl || {}).net_realized)], ['最大ドローダウン', money(p.drawdown)]];
   $('execution').replaceChildren(table(['項目', '値'], executionRows));
-  const fillRows = (data.fill_events || []).slice().reverse().map((x) => [x.occurred_at, x.instrument?.symbol || '—', x.side || '—', integer(x.quantity), money(x.price), money(x.fees)]);
-  $('fills-table').replaceChildren(table(['約定時刻', '銘柄', '売買', '数量', '価格', '手数料'], fillRows));
+  const tradeRows = (data.trade_records || []).slice().reverse().map((x) => [x.closed ? '決済済' : '保有中', x.exit_timestamp || x.timestamp, x.symbol || '—', x.side || '—', integer(x.quantity), money(x.gross_pnl), money(x.fees), [signed(x.net_pnl), Number(x.net_pnl) >= 0 ? 'positive' : 'negative']]);
+  $('trades-table').replaceChildren(table(['状態', '決済時刻', '銘柄', '売買', '数量', '手数料控除前', '手数料', '手数料控除後'], tradeRows));
+  const fillRows = (data.fill_events || []).slice().reverse().map((x) => [x.occurred_at, x.instrument?.symbol || '—', x.side || '—', integer(x.quantity), money(x.price), money(x.fees), x.fee_breakdown?.currency || x.instrument?.currency || '—']);
+  $('fills-table').replaceChildren(table(['約定時刻', '銘柄', '売買', '数量', '価格', '手数料', '通貨'], fillRows));
 }
 function costAmount(item) {
   if (!item || item.request_count === 0) return 'Jev呼出なし';

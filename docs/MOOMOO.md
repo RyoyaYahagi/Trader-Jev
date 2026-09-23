@@ -120,6 +120,26 @@ asyncio.run(read_one_quote())
 
 OpenDの権限、銘柄ごとの相場データ権限、各市場の対応状況はアカウントとサービス条件に依存します。データが取得できない場合は、OpenDのログとmoomoo公式の権限案内を確認してください。[Moomoo API公式 (2026/09), Fee]
 
+## 6. Paper取引の手数料モデル
+
+PaperBrokerは実口座へ接続せず、約定ごとの`FillEvent.fee_breakdown`へ手数料の料金コース、通貨、約定金額、内訳、合計を記録します。`FillEvent.fees`は内訳の合計です。Portfolio Ledgerはこの金額を現金から控除し、`PortfolioState.realized_pnl`と`TradeRecord.net_pnl`を手数料控除後の損益として保持します。`TradeRecord.gross_pnl`は手数料控除前の損益です。
+
+既定のForward Paper設定は、moomoo証券の米国株・ETFベーシックコースです。現在の公式料金表に基づく計算は次のとおりです。
+
+- 米国株・ETF: 約定金額の税込0.132%。1注文あたり税込22米ドルを上限とし、0.01米ドル未満は0.01米ドルとして扱います。料金は小数点以下2桁へ切り上げます。
+- 日本株・ETF現物: 取引手数料とシステム利用料は現在0円です。
+- 米国株・ETFアドバンスコース: 明示的に選択した場合のみ使用します。取引手数料、システム利用料、現地清算費用を別々に記録します。
+
+手数料の最低額・上限額は注文単位で適用します。分割約定では、累積した注文手数料との差額だけを各`FillEvent`へ配賦するため、最低額を約定回数分だけ重複計上しません。為替スプレッド、ADR管理費、信用取引の金利・貸株料、税務上の譲渡益課税はこの取引手数料モデルの対象外です。
+
+CLIでは、たとえば米国株の既定コースを明示できます。
+
+```bash
+trader-jev-forward-paper --fee-schedule MOOMOO_US_BASIC
+```
+
+料金表は変更される可能性があるため、シミュレーション結果の`run_config.fee_schedule`と各約定の`fee_breakdown.schedule`を保存し、同じ条件を再現できるようにします。
+
 ## Sources
 
 [Moomoo API公式, 2026/09] Moomoo. "Introduction." Moomoo API Documentation. https://openapi.moomoo.com/moomoo-api-doc/en/intro/intro.html
@@ -133,5 +153,11 @@ OpenDの権限、銘柄ごとの相場データ権限、各市場の対応状況
 [Moomoo API公式, 2026/09] Moomoo. "Quote Related." Moomoo API Documentation. https://openapi.moomoo.com/moomoo-api-doc/en/qa/quote.html
 
 [Moomoo API公式, 2026/09] Moomoo. "Fee." Moomoo API Documentation. https://openapi.moomoo.com/moomoo-api-doc/en/intro/fee.html
+
+[Moomoo証券公式, 2026/09] "米国株・ETF手数料について（ベーシックコース）." https://www.moomoo.com/jp/support/topic7_183
+
+[Moomoo証券公式, 2026/09] "米国株・ETF手数料について." https://www.moomoo.com/jp/support/topic7_184
+
+[Moomoo証券公式, 2026/09] "日本株・ETF手数料及びその他費用について." https://www.moomoo.com/jp/support/topic7_189
 
 [添付OpenDアーカイブ, 2026/09] `moomoo_OpenD_10.11.7108_Ubuntu18.04.tar.gz`, `README.txt`・`OpenD.xml`.

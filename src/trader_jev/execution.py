@@ -16,6 +16,7 @@ from typing import TYPE_CHECKING
 from pydantic import Field
 
 from trader_jev.clock import SystemClock
+from trader_jev.fees import MoomooFeeCalculator, MoomooFeeSchedule
 from trader_jev.interfaces import BrokerAdapter, Clock
 from trader_jev.models import (
     Action,
@@ -41,6 +42,7 @@ class ExecutionConfig(DomainModel):
 
     entry_model: EntryModel = EntryModel.MARKET
     fee_bps: Decimal = Field(default=Decimal("0"), ge=Decimal("0"))
+    fee_schedule: MoomooFeeSchedule = MoomooFeeSchedule.BASIS_POINTS
     slippage_bps: Decimal = Field(default=Decimal("0"), ge=Decimal("0"))
     latency_ms: int = Field(default=0, ge=0)
     partial_fill_ratio: Decimal = Field(default=Decimal("1"), gt=Decimal("0"), le=Decimal("1"))
@@ -59,6 +61,7 @@ class _TrackedOrder:
     broker_order_id: str
     submitted_at: datetime
     filled_quantity: int = 0
+    filled_notional: Decimal = Decimal("0")
     canceled: bool = False
 
 
@@ -81,6 +84,10 @@ class PaperBroker(BrokerAdapter):
         self._fills: list[FillEvent] = []
         self._sequence = 0
         self._ledger = ledger
+        self._fee_calculator = MoomooFeeCalculator(
+            self.config.fee_schedule,
+            fee_bps=self.config.fee_bps,
+        )
 
     @property
     def orders(self) -> tuple[OrderIntent, ...]:
@@ -218,22 +225,36 @@ class PaperBroker(BrokerAdapter):
         if fill_quantity <= 0:
             return self._record_order_event(tracked, OrderStatus.ACCEPTED, "NO_LIQUIDITY")
         occurred_at = self._clock.now() + timedelta(milliseconds=self.config.latency_ms)
-        fees = abs(fill_price * fill_quantity) * self.config.fee_bps / Decimal("10000")
+        fee_breakdown = self._fee_calculator.calculate(
+            order.instrument,
+            fill_price,
+            fill_quantity,
+            previous_quantity=tracked.filled_quantity,
+            previous_notional=tracked.filled_notional,
+            side=order.side,
+        )
         slippage = fill_price - base_price
         fill = FillEvent(
             order_intent_id=order.order_intent_id,
             occurred_at=occurred_at,
             price=fill_price,
             quantity=fill_quantity,
-            fees=fees,
+            fees=fee_breakdown.total,
+            fee_breakdown=fee_breakdown,
             instrument=order.instrument,
             side=order.side,
             slippage=slippage,
             liquidity="PAPER",
             broker_fill_id=f"paper-fill-{len(self._fills) + 1:08d}",
-            metadata={"entry_model": entry_model.value, "base_price": str(base_price)},
+            metadata={
+                "entry_model": entry_model.value,
+                "base_price": str(base_price),
+                "fee_schedule": fee_breakdown.schedule,
+                "fee_currency": fee_breakdown.currency,
+            },
         )
         tracked.filled_quantity += fill_quantity
+        tracked.filled_notional += fee_breakdown.notional
         status = (
             OrderStatus.FILLED
             if tracked.filled_quantity >= order.quantity

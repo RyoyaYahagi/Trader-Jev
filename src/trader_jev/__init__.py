@@ -53,6 +53,7 @@ from trader_jev.decision import (
     SingleFlightDecisionRunner,
 )
 from trader_jev.execution import ExecutionConfig, PaperBroker, PaperExecutionConfig
+from trader_jev.fees import MoomooFeeCalculator, MoomooFeeSchedule
 from trader_jev.integration import (
     IntegrationMode,
     JevMLDecisionModel,
@@ -83,6 +84,7 @@ from trader_jev.models import (
     CapitalPolicy,
     DecisionSnapshot,
     EntryModel,
+    FeeBreakdown,
     FillEvent,
     InstrumentMetadata,
     NewsEvent,
@@ -156,8 +158,11 @@ __all__ = [
     "DecisionCadenceConfig",
     "DecisionSnapshot",
     "EntryModel",
+    "FeeBreakdown",
     "EquityPoint",
     "ExecutionConfig",
+    "MoomooFeeCalculator",
+    "MoomooFeeSchedule",
     "ExperimentReport",
     "ExperimentReportStore",
     "ForwardPaperProgress",

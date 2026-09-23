@@ -8,6 +8,8 @@ from typing import Any
 from trader_jev.clock import FixedClock, ReplayClock
 from trader_jev.execution import ExecutionConfig, PaperBroker
 from trader_jev.features import InMemoryFeatureEngine
+from trader_jev.fees import MoomooFeeSchedule
+from trader_jev.forward_paper import build_us_instruments
 from trader_jev.models import (
     Action,
     CapitalPolicy,
@@ -67,6 +69,34 @@ def test_market_fill_costs_and_ledger_rebuild(quote: QuoteEvent) -> None:
     assert fill.fees == Decimal("0.505505")
     assert ledger.state.positions == {"TEST": 5}
     assert ledger.state.cash == Decimal("9493.989495")
+    assert ledger.rebuild() == ledger.state
+
+
+def test_moomoo_fee_schedule_records_order_level_fee_across_partial_fills(
+    quote: QuoteEvent,
+) -> None:
+    instrument = build_us_instruments(("AAPL",))[0]
+    us_quote = quote.model_copy(update={"instrument": instrument})
+    ledger = PortfolioLedger(PortfolioState(portfolio_id="paper", cash=Decimal("10000")))
+    broker = PaperBroker(
+        ExecutionConfig(
+            fee_schedule=MoomooFeeSchedule.MOOMOO_US_BASIC,
+            partial_fill_ratio=Decimal("0.5"),
+        ),
+        clock=FixedClock(NOW),
+        ledger=ledger,
+    )
+    broker.update_market(us_quote)
+
+    first_event = asyncio.run(broker.submit(order_for(us_quote, quantity=2)))
+    broker.update_market(us_quote)
+
+    assert first_event.status is OrderStatus.PARTIALLY_FILLED
+    assert len(broker.fills) == 2
+    assert [fill.fees for fill in broker.fills] == [Decimal("0.14"), Decimal("0.13")]
+    assert sum((fill.fees for fill in broker.fills), Decimal("0")) == Decimal("0.27")
+    assert all(fill.fee_breakdown is not None for fill in broker.fills)
+    assert ledger.state.total_fees == Decimal("0.27")
     assert ledger.rebuild() == ledger.state
 
 

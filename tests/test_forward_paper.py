@@ -98,6 +98,10 @@ async def test_forward_paper_entry_and_session_exit_are_paper_only() -> None:
     assert summary.events_processed == 2
     assert summary.fills == 2
     assert summary.portfolio.positions == {}
+    assert summary.portfolio.total_fees > 0
+    assert summary.trade_records
+    assert all(record.net_pnl == record.gross_pnl - record.fees for record in summary.trade_records)
+    assert summary.run_config["fee_schedule"] == "MOOMOO_US_BASIC"
     assert summary.approved_orders >= 2
     assert summary.run_config["execution_mode"] == ExecutionMode.PAPER.value
     assert runner.broker.orders

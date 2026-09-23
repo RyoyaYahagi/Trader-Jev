@@ -414,7 +414,9 @@ class PortfolioState(DomainModel):
     drawdown: Decimal = Field(default=Decimal("0"), ge=Decimal("0"))
     initial_capital: Decimal = Field(default=Decimal("0"), ge=Decimal("0"))
     equity: Decimal | None = Field(default=None, ge=Decimal("0"))
+    gross_realized_pnl: Decimal = Decimal("0")
     realized_pnl: Decimal = Decimal("0")
+    total_fees: Decimal = Field(default=Decimal("0"), ge=Decimal("0"))
     unrealized_pnl: Decimal = Decimal("0")
     average_prices: Mapping[str, Decimal] = Field(default_factory=dict)
     mark_prices: Mapping[str, Decimal] = Field(default_factory=dict)
@@ -462,6 +464,42 @@ class RiskDecision(DomainModel):
     _risk_time_aware = field_validator("checked_at")(_aware)
 
 
+class FeeBreakdown(DomainModel):
+    """A normalized fee charge attached to one virtual fill."""
+
+    schedule: str = Field(min_length=1)
+    currency: str = Field(min_length=3, max_length=3)
+    quantity: int = Field(gt=0)
+    notional: Decimal = Field(gt=Decimal("0"))
+    transaction_fee: Decimal = Field(default=Decimal("0"), ge=Decimal("0"))
+    system_fee: Decimal = Field(default=Decimal("0"), ge=Decimal("0"))
+    local_clearing_fee: Decimal = Field(default=Decimal("0"), ge=Decimal("0"))
+    regulatory_fee: Decimal = Field(default=Decimal("0"), ge=Decimal("0"))
+    tax: Decimal = Field(default=Decimal("0"), ge=Decimal("0"))
+    total: Decimal = Field(default=Decimal("0"), ge=Decimal("0"))
+
+    @field_validator("currency")
+    @classmethod
+    def normalize_currency(cls, value: str) -> str:
+        return value.upper()
+
+    @model_validator(mode="after")
+    def validate_total(self) -> FeeBreakdown:
+        component_total = sum(
+            (
+                self.transaction_fee,
+                self.system_fee,
+                self.local_clearing_fee,
+                self.regulatory_fee,
+                self.tax,
+            ),
+            Decimal("0"),
+        )
+        if self.total != component_total:
+            raise ValueError("fee breakdown total must equal its components")
+        return self
+
+
 class OrderEvent(DomainModel):
     order_intent_id: UUID
     status: OrderStatus
@@ -483,6 +521,7 @@ class FillEvent(DomainModel):
     price: Decimal = Field(gt=Decimal("0"))
     quantity: int = Field(gt=0)
     fees: Decimal = Field(default=Decimal("0"), ge=Decimal("0"))
+    fee_breakdown: FeeBreakdown | None = None
     broker_fill_id: str | None = None
     instrument: InstrumentMetadata | None = None
     side: Action | None = None
@@ -491,6 +530,12 @@ class FillEvent(DomainModel):
     metadata: Mapping[str, Any] = Field(default_factory=dict)
 
     _fill_time_aware = field_validator("occurred_at")(_aware)
+
+    @model_validator(mode="after")
+    def validate_fee_breakdown(self) -> FillEvent:
+        if self.fee_breakdown is not None and self.fees != self.fee_breakdown.total:
+            raise ValueError("fill fees must equal fee breakdown total")
+        return self
 
 
 MarketEvent = QuoteEvent | TradeEvent | OrderBookEvent | BarEvent

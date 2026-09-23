@@ -47,6 +47,9 @@ async def test_synthetic_paper_cli_runs_full_jev_risk_broker_path(tmp_path: Path
     assert summary.pipeline_failures == 0
     assert summary.fills == 3
     assert summary.portfolio.positions == {"TEST": 3}
+    assert len(summary.fill_events) == 3
+    assert len(summary.trade_records) == 3
+    assert summary.run_config["fee_schedule"] == "AUTO"
 
 
 def test_env_file_does_not_override_process_environment(

@@ -21,6 +21,7 @@ from trader_jev.adapters import (
     SyntheticMarketDataAdapter,
 )
 from trader_jev.clock import ReplayClock
+from trader_jev.dashboard import DashboardReadModel
 from trader_jev.decision import (
     JevAdapterConfig,
     JevClient,
@@ -29,6 +30,7 @@ from trader_jev.decision import (
 )
 from trader_jev.execution import ExecutionConfig, PaperBroker
 from trader_jev.features import InMemoryFeatureEngine
+from trader_jev.fees import MoomooFeeSchedule
 from trader_jev.integration import IntegrationMode, JevMLDecisionModel, MLDecisionModel
 from trader_jev.interfaces import DecisionModel, MarketDataAdapter
 from trader_jev.jev_http import JevHttpClient
@@ -44,6 +46,7 @@ from trader_jev.models import (
     BarEvent,
     DomainModel,
     ExecutionMode,
+    FillEvent,
     InstrumentMetadata,
     Market,
     MarketEvent,
@@ -54,6 +57,7 @@ from trader_jev.models import (
     RiskProfile,
     TradingSession,
 )
+from trader_jev.observability import TradeRecord
 from trader_jev.pipeline import PipelineConfig, PipelineResult, TradingPipeline
 from trader_jev.portfolio import PortfolioLedger
 from trader_jev.risk import DeterministicRiskEngine, FixedQuantityPortfolioPolicy, RiskConfig
@@ -72,6 +76,8 @@ class PaperRunSummary(DomainModel):
     fills: int = Field(ge=0)
     portfolio: PortfolioState
     data_stats: Mapping[str, Any]
+    fill_events: tuple[FillEvent, ...] = ()
+    trade_records: tuple[TradeRecord, ...] = ()
     jev_usage: JevUsageSummary = Field(default_factory=JevUsageSummary)
     jev_usage_records: tuple[JevUsageRecord, ...] = ()
     run_config: Mapping[str, Any]
@@ -135,6 +141,12 @@ def build_parser() -> argparse.ArgumentParser:
         help="Allow SHORT intents through Paper risk checks (default: true).",
     )
     parser.add_argument("--fee-bps", type=_decimal, default=Decimal("0"))
+    parser.add_argument(
+        "--fee-schedule",
+        choices=tuple(schedule.value for schedule in MoomooFeeSchedule),
+        default=MoomooFeeSchedule.AUTO.value,
+        help="Paper fee schedule; AUTO uses moomoo JP equity or US basic by market.",
+    )
     parser.add_argument("--slippage-bps", type=_decimal, default=Decimal("0"))
     parser.add_argument("--latency-ms", type=_nonnegative_int, default=0)
     parser.add_argument(
@@ -223,6 +235,9 @@ async def run_paper(
     broker = PaperBroker(
         ExecutionConfig(
             fee_bps=args.fee_bps,
+            fee_schedule=MoomooFeeSchedule(
+                getattr(args, "fee_schedule", MoomooFeeSchedule.AUTO.value)
+            ),
             slippage_bps=args.slippage_bps,
             latency_ms=args.latency_ms,
         ),
@@ -331,6 +346,8 @@ async def run_paper(
         fills=len(ledger.fills),
         portfolio=ledger.state,
         data_stats=data_stats,
+        fill_events=tuple(ledger.fills),
+        trade_records=DashboardReadModel(ledger, clock=clock).trade_history(),
         jev_usage=summarize_usage(jev_usage_records),
         jev_usage_records=jev_usage_records,
         run_config={
@@ -342,6 +359,7 @@ async def run_paper(
             "quantity": quantity,
             "initial_capital": str(args.initial_capital),
             "fee_bps": str(args.fee_bps),
+            "fee_schedule": broker.config.fee_schedule.value,
             "slippage_bps": str(args.slippage_bps),
             "latency_ms": args.latency_ms,
             "ml_artifact": str(ml_artifact_path) if ml_artifact_path is not None else None,

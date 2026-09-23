@@ -25,6 +25,7 @@ from pydantic import Field, field_validator
 
 from trader_jev.cli import load_env_file
 from trader_jev.clock import LiveClock
+from trader_jev.dashboard import DashboardReadModel
 from trader_jev.decision import (
     JevAdapterConfig,
     JevClient,
@@ -35,6 +36,7 @@ from trader_jev.decision import (
 )
 from trader_jev.execution import ExecutionConfig, PaperBroker
 from trader_jev.features import InMemoryFeatureEngine
+from trader_jev.fees import MoomooFeeSchedule
 from trader_jev.interfaces import Clock, DecisionModel, MarketDataAdapter
 from trader_jev.jev_http import JevHttpClient
 from trader_jev.jev_usage import (
@@ -48,6 +50,7 @@ from trader_jev.models import (
     Action,
     DomainModel,
     ExecutionMode,
+    FillEvent,
     InstrumentMetadata,
     Market,
     OrderEvent,
@@ -60,6 +63,7 @@ from trader_jev.models import (
 )
 from trader_jev.moomoo import MoomooClientConfig, MoomooMarketDataAdapter
 from trader_jev.nasdaq_calendar import NasdaqCalendar, NasdaqSession
+from trader_jev.observability import TradeRecord
 from trader_jev.pipeline import PipelineConfig, PipelineResult, TradingPipeline
 from trader_jev.portfolio import HybridExitPolicy, PortfolioLedger
 from trader_jev.risk import (
@@ -191,6 +195,7 @@ class ForwardPaperConfig(DomainModel):
     allow_short: bool = True
     market_hours_only: bool = True
     fee_bps: Decimal = Field(default=Decimal("0"), ge=Decimal("0"))
+    fee_schedule: MoomooFeeSchedule = MoomooFeeSchedule.MOOMOO_US_BASIC
     slippage_bps: Decimal = Field(default=Decimal("0"), ge=Decimal("0"))
     poll_interval_seconds: float = Field(default=1.0, gt=0, le=3600)
     portfolio_id: str = Field(default="forward-paper-us", min_length=1)
@@ -232,9 +237,10 @@ class ForwardPaperSummary(DomainModel):
     fills: int = Field(ge=0)
     errors: tuple[str, ...] = ()
     portfolio: PortfolioState
-    fill_events: tuple[Any, ...] = ()
+    fill_events: tuple[FillEvent, ...] = ()
     order_intents: tuple[OrderIntent, ...] = ()
     order_events: tuple[OrderEvent, ...] = ()
+    trade_records: tuple[TradeRecord, ...] = ()
     jev_usage: JevUsageSummary = Field(default_factory=JevUsageSummary)
     jev_usage_records: tuple[JevUsageRecord, ...] = ()
     run_config: Mapping[str, Any]
@@ -372,6 +378,7 @@ class ForwardPaperRunner:
         self.broker = PaperBroker(
             ExecutionConfig(
                 fee_bps=self.config.fee_bps,
+                fee_schedule=self.config.fee_schedule,
                 slippage_bps=self.config.slippage_bps,
             ),
             clock=self._clock,
@@ -545,6 +552,7 @@ class ForwardPaperRunner:
             fill_events=tuple(self.ledger.fills),
             order_intents=tuple(self.broker.orders),
             order_events=tuple(self.broker.order_events),
+            trade_records=DashboardReadModel(self.ledger, clock=self._clock).trade_history(),
             jev_usage=summarize_usage(jev_usage_records),
             jev_usage_records=jev_usage_records,
             run_config={
@@ -591,6 +599,9 @@ class ForwardPaperRunner:
                 "risk_profile": self.config.risk_profile.value,
                 "allow_short": self.config.allow_short,
                 "market_hours_only": self.config.market_hours_only,
+                "fee_bps": str(self.config.fee_bps),
+                "fee_schedule": self.config.fee_schedule.value,
+                "slippage_bps": str(self.config.slippage_bps),
                 "execution_mode": ExecutionMode.PAPER.value,
             },
         )
@@ -945,6 +956,12 @@ def build_parser() -> argparse.ArgumentParser:
         default=True,
         help="Reject decisions outside the instrument's regular session (default: true).",
     )
+    parser.add_argument(
+        "--fee-schedule",
+        choices=tuple(schedule.value for schedule in MoomooFeeSchedule),
+        default=MoomooFeeSchedule.MOOMOO_US_BASIC.value,
+        help="Paper fee schedule (default: moomoo US basic).",
+    )
     parser.add_argument("--poll-interval-seconds", type=_positive_float, default=1.0)
     parser.add_argument("--portfolio-id", default="forward-paper-us")
     parser.add_argument(
@@ -1053,6 +1070,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             momentum_threshold=args.momentum_threshold,
             allow_short=args.allow_short,
             market_hours_only=args.market_hours_only,
+            fee_schedule=MoomooFeeSchedule(args.fee_schedule),
             poll_interval_seconds=args.poll_interval_seconds,
             portfolio_id=args.portfolio_id,
             jev_model=jev_model,

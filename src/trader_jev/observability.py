@@ -279,7 +279,9 @@ class PortfolioView(DomainModel):
     current_equity: Decimal
     available_cash: Decimal
     market_value: Decimal
+    gross_realized_pnl: Decimal
     realized_pnl: Decimal
+    fees: Decimal
     unrealized_pnl: Decimal
     total_return: Decimal
     drawdown: Decimal
@@ -319,6 +321,8 @@ class TradeRecord(DomainModel):
     quantity: int
     gross_pnl: Decimal = Decimal("0")
     fees: Decimal = Decimal("0")
+    fee_currency: str | None = None
+    fee_schedule: str | None = None
     slippage: Decimal = Decimal("0")
     net_pnl: Decimal = Decimal("0")
     holding_duration_seconds: float | None = Field(default=None, ge=0)
@@ -407,6 +411,7 @@ class DashboardOverview(DomainModel):
     current_equity: Decimal = Decimal("0")
     cash: Decimal = Decimal("0")
     unrealized_pnl: Decimal = Decimal("0")
+    fees: Decimal = Decimal("0")
     realized_pnl: Decimal = Decimal("0")
     daily_pnl: Decimal = Decimal("0")
     cumulative_pnl: Decimal = Decimal("0")
@@ -696,6 +701,7 @@ class DashboardReadModel:
         unrealized = sum((state.unrealized_pnl for state in states), Decimal("0"))
         realized = sum((state.realized_pnl for state in states), Decimal("0"))
         daily = sum((state.daily_pnl for state in states), Decimal("0"))
+        fees = sum((state.total_fees for state in states), Decimal("0"))
         initial = sum((view.initial_capital for view in views), Decimal("0"))
         exposure = sum((view.market_value for view in views), Decimal("0"))
         positions = sum(len(view.positions) for view in views)
@@ -717,6 +723,7 @@ class DashboardReadModel:
             current_equity=current_equity,
             cash=cash,
             unrealized_pnl=unrealized,
+            fees=fees,
             realized_pnl=realized,
             daily_pnl=daily,
             cumulative_pnl=current_equity - initial,
@@ -977,7 +984,9 @@ class DashboardReadModel:
             current_equity=equity,
             available_cash=state.cash,
             market_value=sum((position.market_value for position in positions), Decimal("0")),
+            gross_realized_pnl=state.gross_realized_pnl,
             realized_pnl=state.realized_pnl,
+            fees=state.total_fees,
             unrealized_pnl=state.unrealized_pnl,
             total_return=(equity - initial) / initial if initial else Decimal("0"),
             drawdown=state.drawdown,
@@ -1108,6 +1117,8 @@ class DashboardReadModel:
                         quantity=quantity,
                         gross_pnl=gross,
                         fees=fees,
+                        fee_currency=_fee_currency(lot.fill, fill, lot.order.instrument.currency),
+                        fee_schedule=_fee_schedule(lot.fill, fill),
                         slippage=slippage,
                         net_pnl=net,
                         holding_duration_seconds=max(
@@ -1157,6 +1168,8 @@ class DashboardReadModel:
                     quantity=quantity,
                     gross_pnl=gross,
                     fees=fees,
+                    fee_currency=_fee_currency(lot.fill, None, lot.order.instrument.currency),
+                    fee_schedule=_fee_schedule(lot.fill, None),
                     slippage=lot.slippage_per_unit * quantity,
                     net_pnl=gross - fees,
                     holding_duration_seconds=max(
@@ -1182,6 +1195,7 @@ class DashboardReadModel:
     def _empty_performance(self, trades: Sequence[TradeRecord]) -> PerformanceMetrics:
         initial = self._initial_capital(None)
         latest = max((trade.timestamp for trade in trades), default=None)
+        fills, _ = self._fills_and_orders(None)
         return PerformanceMetrics(
             period_start=latest,
             period_end=latest,
@@ -1196,6 +1210,7 @@ class DashboardReadModel:
             else (),
             return_pct=Decimal("0"),
             trade_count=0,
+            fees=sum((fill.fees for fill in fills), Decimal("0")),
         )
 
     def _session_state(self, now: datetime) -> str:
@@ -1313,6 +1328,20 @@ def _matches_trade(trade: TradeRecord, query: DashboardQuery) -> bool:
 def _metadata_text(metadata: Mapping[str, Any], key: str) -> str | None:
     value = metadata.get(key)
     return str(value) if value is not None else None
+
+
+def _fee_currency(entry: FillEvent, exit: FillEvent | None, fallback: str) -> str:
+    for fill in (entry, exit):
+        if fill is not None and fill.fee_breakdown is not None:
+            return fill.fee_breakdown.currency
+    return fallback
+
+
+def _fee_schedule(entry: FillEvent, exit: FillEvent | None) -> str | None:
+    for fill in (entry, exit):
+        if fill is not None and fill.fee_breakdown is not None:
+            return fill.fee_breakdown.schedule
+    return None
 
 
 def _risk_profile(metadata: Mapping[str, Any], default: RiskProfile) -> RiskProfile:

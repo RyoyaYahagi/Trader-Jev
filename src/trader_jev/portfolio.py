@@ -194,6 +194,7 @@ class PortfolioLedger:
         signed_quantity = fill.quantity if order.side is Action.LONG else -fill.quantity
         old_quantity = positions.get(symbol, 0)
         old_average = averages.get(symbol, fill.price)
+        gross_realized = self._state.gross_realized_pnl
         realized = self._state.realized_pnl
 
         if old_quantity == 0 or old_quantity * signed_quantity > 0:
@@ -206,7 +207,9 @@ class PortfolioLedger:
         else:
             closing = min(abs(old_quantity), abs(signed_quantity))
             direction = Decimal("1") if old_quantity > 0 else Decimal("-1")
-            realized += (fill.price - old_average) * closing * direction
+            realized_change = (fill.price - old_average) * closing * direction
+            gross_realized += realized_change
+            realized += realized_change
             remainder = old_quantity + signed_quantity
             if remainder == 0:
                 averages.pop(symbol, None)
@@ -218,6 +221,7 @@ class PortfolioLedger:
 
         if old_quantity == 0 or old_quantity * signed_quantity > 0:
             positions[symbol] = old_quantity + signed_quantity
+        total_fees = self._state.total_fees + fill.fees
         realized -= fill.fees
         if positions.get(symbol) == 0:
             positions.pop(symbol, None)
@@ -228,7 +232,9 @@ class PortfolioLedger:
                 "positions": positions,
                 "average_prices": averages,
                 "position_entry_times": entries,
+                "gross_realized_pnl": gross_realized,
                 "realized_pnl": realized,
+                "total_fees": total_fees,
                 "daily_pnl": realized + self._state.unrealized_pnl,
                 "updated_at": fill.occurred_at,
             }

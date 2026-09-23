@@ -34,6 +34,11 @@ positions/orders, equity and cost metrics, structured-log filtering, health,
 forward-Paper progress, and reproducible experiment metadata. Sensitive
 credential-like log fields are redacted before they enter the read model.
 
+Forward Paper reports also retain the fee-aware PnL trail. Each fill includes a
+fee breakdown with its currency and schedule. Each matched trade includes
+`gross_pnl` before fees, `fees`, and `net_pnl` after fees. Portfolio
+`realized_pnl` and the dashboard's cumulative PnL use the after-fee value.
+
 The current milestone remains Paper-execution-only. Read-only realtime quote
 input may come through the separate Moomoo market-data adapter, but the
 dashboard itself exposes no live connectivity or control operation. Shadow/Live

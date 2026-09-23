@@ -80,6 +80,11 @@ def test_report_store_loads_latest_and_dashboard_payload(tmp_path: Path) -> None
     assert loaded[0] == name
     payload = dashboard_payload(*loaded)
     assert payload["portfolio"]["equity"] == "10010"
+    assert payload["pnl"] == {
+        "gross_realized": "0",
+        "fees": "0",
+        "net_realized": "0",
+    }
     assert payload["positions"] == [
         {
             "symbol": "AAPL",

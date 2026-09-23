@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from datetime import timedelta
 from decimal import Decimal
 
@@ -20,8 +21,10 @@ from trader_jev.dashboard import (
     PortfolioRegistration,
     StructuredLogRecord,
 )
-from trader_jev.execution import PaperBroker
+from trader_jev.execution import ExecutionConfig, PaperBroker
 from trader_jev.features import InMemoryFeatureEngine
+from trader_jev.fees import MoomooFeeSchedule
+from trader_jev.forward_paper import build_us_instruments
 from trader_jev.models import (
     Action,
     CapitalPolicy,
@@ -132,6 +135,42 @@ def test_dashboard_reads_ledger_positions_trades_and_performance(quote: object) 
     assert not dashboard.trade_history(DashboardQuery(winning=True))
     assert entry_intent.intent_id == entry.source_trade_intent_id
     assert exit_order.order_intent_id != entry.order_intent_id
+
+
+def test_dashboard_records_moomoo_fees_and_net_trade_pnl(quote: object) -> None:
+    instrument = build_us_instruments(("AAPL",))[0]
+    us_quote = quote.model_copy(update={"instrument": instrument})  # type: ignore[attr-defined]
+    ledger = PortfolioLedger(PortfolioState(portfolio_id="paper", cash=Decimal("10000")))
+    broker = PaperBroker(
+        ExecutionConfig(fee_schedule=MoomooFeeSchedule.MOOMOO_US_BASIC),
+        clock=FixedClock(NOW),
+        ledger=ledger,
+    )
+    broker.update_market(us_quote)  # type: ignore[arg-type]
+    entry_intent = TradeIntent(
+        snapshot_id=us_quote.event_id,  # type: ignore[attr-defined]
+        instrument=instrument,
+        action=Action.LONG,
+        requested_quantity=1,
+        strategy_id="fee-aware",
+        reason="entry",
+        created_at=NOW,
+    )
+    exit_intent = entry_intent.model_copy(update={"action": Action.SHORT, "reason": "exit"})
+    asyncio.run(broker.submit(_order(us_quote, side=Action.LONG, source=entry_intent)))  # type: ignore[arg-type]
+    asyncio.run(broker.submit(_order(us_quote, side=Action.SHORT, source=exit_intent)))  # type: ignore[arg-type]
+
+    dashboard = DashboardReadModel(ledger, clock=FixedClock(NOW))
+    trade = dashboard.trade_history()[0]
+
+    assert trade.gross_pnl == Decimal("-1")
+    assert trade.fees == Decimal("0.28")
+    assert trade.net_pnl == Decimal("-1.28")
+    assert trade.fee_currency == "USD"
+    assert trade.fee_schedule == MoomooFeeSchedule.MOOMOO_US_BASIC.value
+    assert ledger.state.gross_realized_pnl == Decimal("-1")
+    assert ledger.state.total_fees == Decimal("0.28")
+    assert ledger.state.realized_pnl == Decimal("-1.28")
 
 
 def test_dashboard_positions_and_multiple_portfolios_are_read_only(quote: object) -> None:

@@ -489,6 +489,14 @@ class ExperimentRunSpec(DomainModel):
     config: Mapping[str, Any]
 
 
+class ExperimentSchedulePhase(DomainModel):
+    """Ordered candidate and case groups, swept once before each repetition."""
+
+    phase: str = Field(min_length=1)
+    candidate_ids: tuple[str, ...] = Field(min_length=1)
+    case_groups: tuple[tuple[str, ...], ...] = Field(min_length=1)
+
+
 class ExperimentPlan(DomainModel):
     """Versioned catalog that expands into every planned run."""
 
@@ -505,6 +513,7 @@ class ExperimentPlan(DomainModel):
         default_factory=lambda: (ExperimentCandidate(),)
     )
     schema_version: str = Field(default="1", min_length=1)
+    schedule: tuple[ExperimentSchedulePhase, ...] = ()
 
     @model_validator(mode="after")
     def validate_unique_ids(self) -> ExperimentPlan:
@@ -521,6 +530,27 @@ class ExperimentPlan(DomainModel):
             raise ValueError("at least one experiment case must be enabled")
         if not any(candidate.enabled for candidate in self.candidates):
             raise ValueError("at least one experiment candidate must be enabled")
+        if self.schedule:
+            expected = {
+                (case.case_id, candidate.candidate_id)
+                for case in self.cases
+                if case.enabled
+                for candidate in self.candidates
+                if candidate.enabled
+            }
+            scheduled = [
+                (case_id, candidate_id)
+                for phase in self.schedule
+                for candidate_id in phase.candidate_ids
+                for group in phase.case_groups
+                for case_id in group
+            ]
+            if any(not group for phase in self.schedule for group in phase.case_groups):
+                raise ValueError("schedule case groups must not be empty")
+            if len({phase.phase for phase in self.schedule}) != len(self.schedule):
+                raise ValueError("schedule phase names must be unique")
+            if set(scheduled) != expected or len(scheduled) != len(expected):
+                raise ValueError("schedule must cover every enabled case/candidate exactly once")
         return self
 
     @classmethod
@@ -547,7 +577,15 @@ class ExperimentPlan(DomainModel):
 
     @property
     def plan_hash(self) -> str:
-        return _hash_json(self.model_dump(mode="json"))
+        return _hash_json(self.document())
+
+    def document(self) -> dict[str, Any]:
+        """Preserve hashes of legacy plans that have no explicit schedule."""
+
+        document = self.model_dump(mode="json")
+        if not self.schedule:
+            document.pop("schedule")
+        return document
 
     def runs(self) -> tuple[ExperimentRunSpec, ...]:
         """Expand all enabled cases across all declared splits and replicates."""
@@ -590,7 +628,39 @@ class ExperimentPlan(DomainModel):
                                 config=config,
                             )
                         )
-        return tuple(resolved)
+        if not self.schedule:
+            return tuple(resolved)
+        by_key = {
+            (run.split_id, run.case_id, run.config["candidate"]["candidate_id"], run.replicate): run
+            for run in resolved
+        }
+        ordered: list[ExperimentRunSpec] = []
+        for phase in self.schedule:
+            for split in self.splits:
+                for replicate in range(1, self.replicates + 1):
+                    for candidate_id in phase.candidate_ids:
+                        for group_index, group in enumerate(phase.case_groups):
+                            comparison_group = (
+                                f"{self.plan_id}__{phase.phase}__{split.split_id}"
+                                f"__r{replicate:02d}__{candidate_id}__g{group_index}"
+                            )
+                            for case_id in group:
+                                run = by_key[(split.split_id, case_id, candidate_id, replicate)]
+                                config = dict(run.config)
+                                config["schedule"] = {
+                                    "rank": len(ordered) + 1,
+                                    "phase": phase.phase,
+                                    "comparison_group": comparison_group,
+                                }
+                                ordered.append(
+                                    run.model_copy(
+                                        update={
+                                            "config": config,
+                                            "config_hash": _hash_json(config),
+                                        }
+                                    )
+                                )
+        return tuple(ordered)
 
 
 class ExperimentMetric(DomainModel):
@@ -709,7 +779,7 @@ class ExperimentRegistry:
         untouched.
         """
 
-        plan_json = _canonical_json(plan.model_dump(mode="json"))
+        plan_json = _canonical_json(plan.document())
         plan_hash = _sha256_text(plan_json)
         now = _now_text()
         with self._transaction() as connection:
@@ -791,7 +861,10 @@ class ExperimentRegistry:
             values.append(status.value)
         if conditions:
             query += " WHERE " + " AND ".join(conditions)
-        query += " ORDER BY created_at, run_id"
+        query += (
+            " ORDER BY COALESCE(json_extract(config_json, '$.schedule.rank'), 2147483647),"
+            " created_at, run_id"
+        )
         with self._lock:
             rows = self._connection.execute(query, values).fetchall()
         return tuple(self._run_from_row(row) for row in rows)
@@ -872,7 +945,8 @@ class ExperimentRegistry:
                 query += " AND split_kind = ?"
                 values.append(split_kind.value)
             query += """
-                ORDER BY CASE status WHEN 'QUEUED' THEN 0 ELSE 1 END,
+                ORDER BY COALESCE(json_extract(config_json, '$.schedule.rank'), 2147483647),
+                         CASE status WHEN 'QUEUED' THEN 0 ELSE 1 END,
                          created_at, run_id
                 LIMIT 1
             """

@@ -91,9 +91,25 @@
 
 ## 自律Forward Paperの運用
 
-`jev-forward-paper-v2-no-news-ml` は、2つの入力プロファイル × 3つの方向ゲートケース × 5つの有効candidate × 5反復、合計150 runを登録します。入力プロファイルと閾値の全組み合わせを同じ運用候補で比較します。15分・30分予測の2候補は質問セット未対応のため無効候補として計画に残し、runへは展開しません。
+`jev-forward-paper-v3-prioritized` は、2つの入力プロファイル × 3つの方向ゲートケース × 5つの有効candidate × 5反復、合計150 runを登録します。入力プロファイルと閾値の全組み合わせを同じ運用候補で比較します。15分・30分予測の2候補は質問セット未対応のため無効候補として計画に残し、runへは展開しません。
 
-計画内容を変更した場合に既存のSQLite履歴を上書きしないよう、前版の `jev-forward-paper-v1` とは別の `plan_id` を使用します。
+優先順位を設定したため、v1・v2とは別の `plan_id` を使用します。既存の計画と履歴は保持します。新しい計画を登録し、workerの `--plan-id` をv3へ切り替えます。旧計画のworkerの停止や稼働中の実験の扱いは、運用時に確認してください。
+
+優先順位は以下のとおりです。順位は実行開始の順序を表し、成功件数や性能による段階移行の判定ではありません。
+
+| 順位 | 段階 | 比較対象 | run数 |
+| --- | --- | --- | --- |
+| 1〜10 | P0-baseline | 2入力、基準閾値0.60/0.10、基準運用条件 | 10 |
+| 11〜30 | P1-threshold | 2入力、追加閾値0.60/0.20と0.70/0.10、基準運用条件 | 20 |
+| 31〜150 | P2-operating | 2入力、3閾値、残り4運用条件 | 120 |
+
+150 runそれぞれの順位は [実行順一覧CSV](jev-forward-paper-run-order.csv) に記載します。`nominal_trading_day` は1日2 runを中断なく開始した場合の取引日番号です。実際の日付や完了予定日ではありません。実行順の正本はYAMLの `schedule` です。
+
+各段階では反復番号を先に進めます。例えばP1は、0.60/0.20の2入力、0.70/0.10の2入力を実行してから2反復目へ進みます。P2は60秒間隔、15秒間隔、最大保有30分、損切り1.5 ATRの順に各3閾値を試し、24 runを一巡してから次の反復へ進みます。判断頻度の比較を先に行い、その後に出口条件を比較するための固定順序です。
+
+YAMLの `schedule` に段階、運用候補の順番、比較するケースの組を指定します。有効なケースと運用候補の組み合わせに漏れ・重複があれば登録前にエラーにします。各runのSQLite設定には `schedule.rank`（全体順位）、`schedule.phase`（段階）、`schedule.comparison_group`（比較する組の識別子）を保存し、設定ハッシュにも含めます。一覧と取得は順位に従います。優先順位を指定しない既存計画は従来の順序とハッシュを維持します。
+
+同条件のテクニカルのみ／板・約定・需給付きは隣り合う順位です。同時実行枠が2件空いている通常の実行では続けて開始されますが、組単位の原子的な取得や開始同期は行いません。障害・再試行・複数workerによって実行時刻がずれることがあるため、比較時には実際の稼働期間を照合します。段階間では実施日が異なり、市場環境の差も結果に含まれます。
 
 運用上の初期値は次のとおりです。
 
@@ -105,7 +121,7 @@
 - 失敗・タイムアウト: `FAILED` として理由・メトリクス・artifactを保存し、再試行可能
 - stale worker: heartbeatを監視し、復旧時は元のattemptを失敗として残して同じrunを再キュー
 
-日次上限は `started_at` がその予算日に初めて設定されたrun行を数えます。再試行は同じrun行のattempt追加なので新規枠を消費しません。150 runを一巡する最短目安は、失敗・休場を除き75取引日です。これは入力・閾値・運用候補の比較を揃え、過学習を抑えるための初期運用値です。
+日次上限は `started_at` がその予算日に初めて設定されたrun行を数えます。再試行は同じrun行のattempt追加なので新規枠を消費しません。150 runを一巡する最短目安は、失敗・休場を除き75取引日です。この日数は実行件数から求めた下限であり、統計的な十分性や過学習の抑制を保証しません。
 
 登録と自動実行:
 
@@ -116,11 +132,11 @@ uv run trader-jev-experiment register \
 
 uv run trader-jev-experiment budget \
   --db var/experiments.sqlite \
-  --plan-id jev-forward-paper-v2-no-news-ml
+  --plan-id jev-forward-paper-v3-prioritized
 
 uv run trader-jev-experiment-worker \
   --db var/experiments.sqlite \
-  --plan-id jev-forward-paper-v2-no-news-ml \
+  --plan-id jev-forward-paper-v3-prioritized \
   --worker-id paper-01 \
   --env-file .env \
   --report-dir var/paper-experiments \

@@ -1,8 +1,29 @@
 schema_version: "1"
-plan_id: jev-forward-paper-v2-no-news-ml
+plan_id: jev-forward-paper-v3-prioritized
 name: Autonomous Jev Forward Paper
 purpose: Accumulate independent Paper trading sessions for Jev entry policies using technical-only and microstructure inputs; news and ML are not active in this plan.
 replicates: 5
+# Phase order, then replicate, candidate, case group, and group member.
+schedule:
+  - phase: P0-baseline
+    candidate_ids: [baseline-5m-30s-atr1-r1p5-15m]
+    case_groups:
+      - [jev-technical-p60-m10, jev-microstructure-p60-m10]
+  - phase: P1-threshold
+    candidate_ids: [baseline-5m-30s-atr1-r1p5-15m]
+    case_groups:
+      - [jev-technical-p60-m20, jev-microstructure-p60-m20]
+      - [jev-technical-p70-m10, jev-microstructure-p70-m10]
+  - phase: P2-operating
+    candidate_ids:
+      - slow-cadence-5m-60s-atr1-r1p5-15m
+      - fast-cadence-5m-15s-atr1-r1p5-15m
+      - longer-hold-5m-30s-atr1-r1p5-30m
+      - wide-stop-5m-30s-atr1p5-r1p5-15m
+    case_groups:
+      - [jev-technical-p60-m10, jev-microstructure-p60-m10]
+      - [jev-technical-p60-m20, jev-microstructure-p60-m20]
+      - [jev-technical-p70-m10, jev-microstructure-p70-m10]
 context:
   code_version: REPLACE_WITH_GIT_COMMIT
   data_manifest_version: realtime-read-only-moomoo-v1

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import sqlite3
+from collections import Counter
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
@@ -357,7 +359,7 @@ def test_forward_paper_plan_records_initial_candidates_and_budget() -> None:
     plan_path = Path(__file__).parents[1] / "configs" / "jev-forward-paper-plan.yaml"
     plan = ExperimentPlan.from_yaml(plan_path)
 
-    assert plan.plan_id == "jev-forward-paper-v2-no-news-ml"
+    assert plan.plan_id == "jev-forward-paper-v3-prioritized"
     assert plan.operations.daily_run_limit == 2
     assert plan.operations.max_concurrent_runs == 2
     assert len(plan.candidates) == 7
@@ -374,3 +376,83 @@ def test_forward_paper_plan_records_initial_candidates_and_budget() -> None:
     )
     assert len(plan.runs()) == 2 * 3 * 5 * 5
     assert {candidate.prediction_horizon_minutes for candidate in plan.candidates[:5]} == {5}
+
+
+def test_scheduled_runs_are_claimed_in_order_after_reopening(tmp_path: Path) -> None:
+    plan = ExperimentPlan.from_yaml(
+        Path(__file__).parents[1] / "configs" / "jev-forward-paper-plan.yaml"
+    )
+    runs = plan.runs()
+    assert [run.config["schedule"]["rank"] for run in runs] == list(range(1, 151))
+    assert Counter(run.config["schedule"]["phase"] for run in runs) == {
+        "P0-baseline": 10,
+        "P1-threshold": 20,
+        "P2-operating": 120,
+    }
+    for first, second in zip(runs[::2], runs[1::2], strict=True):
+        assert (
+            first.config["schedule"]["comparison_group"]
+            == second.config["schedule"]["comparison_group"]
+        )
+        assert first.config["candidate"] == second.config["candidate"]
+        assert first.config["case"]["output_policy"] == second.config["case"]["output_policy"]
+        assert first.config["case"]["input_profile"] == "TECHNICAL_ONLY"
+        assert second.config["case"]["input_profile"] == "MICROSTRUCTURE"
+    assert [run.replicate for run in runs[10:18]] == [1] * 4 + [2] * 4
+    assert [run.replicate for run in runs[30:78]] == [1] * 24 + [2] * 24
+    path = tmp_path / "schedule.sqlite"
+    with ExperimentRegistry(path) as registry:
+        registry.register_plan(plan)
+        first = registry.claim_next(worker_id="setup", plan_id=plan.plan_id)
+        assert first is not None
+        registry.fail(first, error_code="TEST", error_reason="retry ordering")
+        registry.retry_failed(first.run.run_id)
+    # A queued low-priority row must not overtake planned baseline rows.
+    with sqlite3.connect(path) as connection:
+        connection.execute(
+            "UPDATE experiment_runs SET status = 'QUEUED' WHERE run_id = ?",
+            (runs[-1].run_id,),
+        )
+    with ExperimentRegistry(path) as registry:
+        assert [run.run_id for run in registry.list_runs()] == [run.run_id for run in runs]
+        for expected in runs:
+            lease = registry.claim_next(worker_id="test", plan_id=plan.plan_id)
+            assert lease is not None
+            assert lease.run.run_id == expected.run_id
+            assert lease.run.config_hash == expected.config_hash
+            registry.succeed(lease)
+        assert registry.claim_next(worker_id="test", plan_id=plan.plan_id) is None
+
+
+@pytest.mark.parametrize("mutation", ["missing", "duplicate", "unknown", "empty"])
+def test_schedule_rejects_incomplete_or_ambiguous_coverage(mutation: str) -> None:
+    plan = ExperimentPlan.from_yaml(
+        Path(__file__).parents[1] / "configs" / "jev-forward-paper-plan.yaml"
+    )
+    document = plan.document()
+    groups = document["schedule"][0]["case_groups"]
+    if mutation == "missing":
+        groups[0].pop()
+    elif mutation == "duplicate":
+        groups.append(list(groups[0]))
+    elif mutation == "unknown":
+        groups[0][0] = "missing-case"
+    else:
+        groups.append([])
+    with pytest.raises(ValueError, match="schedule"):
+        ExperimentPlan.from_mapping(document)
+
+
+def test_unscheduled_plan_document_preserves_legacy_hash() -> None:
+    import hashlib
+    import json
+
+    plan = _plan()
+    legacy = plan.model_dump(mode="json", exclude={"schedule"})
+    assert plan.document() == legacy
+    assert (
+        plan.plan_hash
+        == hashlib.sha256(
+            json.dumps(legacy, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode()
+        ).hexdigest()
+    )

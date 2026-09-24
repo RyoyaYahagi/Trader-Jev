@@ -168,6 +168,101 @@ def test_report_store_loads_latest_and_dashboard_payload(tmp_path: Path) -> None
     assert payload["performance"]["cumulative_realized_net_pnl"] == []
 
 
+def test_report_store_reuses_report_reads_across_dashboard_queries(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    usage = JevUsageRecord(
+        occurred_at=NOW,
+        request_id="cached-request",
+        success=True,
+        input_tokens=100,
+        output_tokens=25,
+        total_tokens=125,
+        estimated_cost=Decimal("0.01"),
+        cost_status="ESTIMATED",
+    )
+    write_named_report(tmp_path, "forward-paper-rule.json", make_branch_summary("RULE"))
+    jev = make_branch_summary("JEV").model_copy(
+        update={"jev_usage_records": (usage,), "jev_usage": summarize_usage((usage,))}
+    )
+    write_named_report(tmp_path, "forward-paper-jev.json", jev)
+
+    store = ReportStore(tmp_path)
+    original_read_text = Path.read_text
+    reads: list[str] = []
+
+    def count_report_reads(
+        path: Path, encoding: str | None = None, errors: str | None = None
+    ) -> str:
+        if path.parent == tmp_path and path.suffix == ".json":
+            reads.append(path.name)
+        return original_read_text(path, encoding=encoding, errors=errors)
+
+    monkeypatch.setattr(Path, "read_text", count_report_reads)
+
+    entries = store.index()
+    assert len(reads) == 2
+
+    store.index()
+    assert len(reads) == 2
+    rule_entry = next(entry for entry in entries if entry["decision_mode"] == "RULE")
+    pair = store.comparison_pair(rule_entry["session_date"], rule_entry["capital_key"])
+    assert pair["rule"] is not None
+    assert pair["jev"] is not None
+    assert len(reads) == 4
+
+    store.comparison_pair(rule_entry["session_date"], rule_entry["capital_key"])
+    assert len(reads) == 4
+
+    first_costs = store.cost_summary(reference_time=NOW)
+    cost_read_count = len(reads)
+    second_costs = store.cost_summary(reference_time=NOW)
+    assert first_costs == second_costs
+    assert len(reads) == cost_read_count
+
+
+def test_report_store_refreshes_cached_views_when_a_report_changes(tmp_path: Path) -> None:
+    usage = JevUsageRecord(
+        occurred_at=NOW,
+        request_id="refresh-request",
+        success=True,
+        input_tokens=100,
+        output_tokens=25,
+        total_tokens=125,
+        estimated_cost=Decimal("0.01"),
+        cost_status="ESTIMATED",
+    )
+    name = "forward-paper-jev.json"
+    summary = make_branch_summary("JEV").model_copy(
+        update={"jev_usage_records": (usage,), "jev_usage": summarize_usage((usage,))}
+    )
+    write_named_report(tmp_path, name, summary)
+    store = ReportStore(tmp_path)
+    store.warm()
+
+    updated_usage = usage.model_copy(update={"input_tokens": 300, "total_tokens": 325})
+    updated_summary = summary.model_copy(
+        update={
+            "status": "FAILED",
+            "jev_usage_records": (updated_usage,),
+            "jev_usage": summarize_usage((updated_usage,)),
+        }
+    )
+    (tmp_path / name).write_text(
+        json.dumps(updated_summary.model_dump(mode="json"), ensure_ascii=False) + " ",
+        encoding="utf-8",
+    )
+
+    entry = store.index()[0]
+    payload = store.load_payload(name)
+    costs = store.cost_summary(reference_time=NOW)
+
+    assert entry["status"] == "FAILED"
+    assert payload is not None
+    assert payload[1]["status"] == "FAILED"
+    assert costs["daily"]["total_tokens"] == 325
+
+
 def test_dashboard_payload_falls_back_to_portfolio_fees_without_fill_events() -> None:
     base = make_summary()
     summary = base.model_copy(

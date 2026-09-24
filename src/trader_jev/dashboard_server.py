@@ -11,10 +11,12 @@ import argparse
 import json
 import logging
 from collections.abc import Mapping, Sequence
+from copy import deepcopy
 from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+from threading import RLock
 from typing import Any, cast
 from urllib.parse import parse_qs, urlparse
 from zoneinfo import ZoneInfo
@@ -42,6 +44,26 @@ class ReportStore:
 
     def __init__(self, report_dir: Path) -> None:
         self.report_dir = report_dir.expanduser().resolve()
+        self._cache_lock = RLock()
+        self._index_signature: tuple[tuple[str, int, int, int], ...] | None = None
+        self._index_cache: tuple[dict[str, Any], ...] = ()
+        self._payload_cache: dict[str, dict[str, Any]] = {}
+        self._cost_cache_key: tuple[
+            tuple[tuple[str, int, int, int], ...], str, datetime | None
+        ] | None = None
+        self._cost_cache: dict[str, Any] | None = None
+
+    def _file_signature(self, pattern: str) -> tuple[tuple[str, int, int, int], ...]:
+        if not self.report_dir.is_dir():
+            return ()
+        signatures: list[tuple[str, int, int, int]] = []
+        for path in self.report_dir.glob(pattern):
+            try:
+                stat = path.stat()
+            except OSError:
+                continue
+            signatures.append((path.name, stat.st_mtime_ns, stat.st_ctime_ns, stat.st_size))
+        return tuple(sorted(signatures))
 
     def names(self) -> tuple[str, ...]:
         if not self.report_dir.is_dir():
@@ -71,56 +93,120 @@ class ReportStore:
             raise DashboardReportError(f"could not load report {path.name}") from exc
 
     def index(self) -> tuple[dict[str, Any], ...]:
-        entries: list[dict[str, Any]] = []
-        for name in self.names():
-            try:
-                loaded = self.load(name)
-            except DashboardReportError as exc:
-                entries.append({"name": name, "status": "INVALID", "error": str(exc)})
-                continue
+        signature = self._file_signature("forward-paper-*.json")
+        with self._cache_lock:
+            if signature == self._index_signature:
+                return deepcopy(self._index_cache)
+
+            entries: list[dict[str, Any]] = []
+            self._payload_cache.clear()
+            for name in self.names():
+                try:
+                    loaded = self.load(name)
+                except DashboardReportError as exc:
+                    entries.append({"name": name, "status": "INVALID", "error": str(exc)})
+                    continue
+                if loaded is None:
+                    continue
+                report_name, summary = loaded
+                total_fees = summary.portfolio.total_fees or sum(
+                    (fill.fees for fill in summary.fill_events), Decimal("0")
+                )
+                entries.append(
+                    {
+                        "name": report_name,
+                        "status": summary.status,
+                        "started_at": summary.started_at.isoformat(),
+                        "finished_at": summary.finished_at.isoformat(),
+                        "equity": str(summary.portfolio.equity or summary.portfolio.cash),
+                        "daily_pnl": str(summary.portfolio.daily_pnl),
+                        "fees": str(total_fees),
+                        "fills": summary.fills,
+                        "positions": len(summary.portfolio.positions),
+                        "open_orders": summary.portfolio.open_orders,
+                        "scenario_id": summary.run_config.get("scenario_id", "single"),
+                        "scenario_label": summary.run_config.get("scenario_label", "単一条件"),
+                        "decision_mode": str(
+                            summary.run_config.get("decision_mode", "RULE")
+                        ).upper(),
+                        "decision_label": summary.run_config.get("decision_label", "ルール判定"),
+                        "initial_capital": str(summary.portfolio.initial_capital),
+                        "jpy_capital": summary.run_config.get("jpy_capital"),
+                        "capital_constraint": summary.run_config.get("capital_constraint"),
+                        "usd_jpy_rate": summary.run_config.get("usd_jpy_rate"),
+                        "session_date": summary.started_at.astimezone(ZoneInfo("Asia/Tokyo"))
+                        .date()
+                        .isoformat(),
+                        "capital_key": _capital_condition_key(
+                            summary.portfolio.initial_capital,
+                            summary.run_config.get("capital_constraint"),
+                            summary.run_config.get("jpy_capital"),
+                        ),
+                        "capital_label": _capital_condition_label(
+                            scenario_id=str(summary.run_config.get("scenario_id", "single")),
+                            initial_capital=summary.portfolio.initial_capital,
+                            capital_constraint=summary.run_config.get("capital_constraint"),
+                            jpy_capital=summary.run_config.get("jpy_capital"),
+                        ),
+                    }
+                )
+
+            self._index_signature = signature
+            self._index_cache = tuple(entries)
+            self._cost_cache_key = None
+            self._cost_cache = None
+            return deepcopy(self._index_cache)
+
+    def load_payload(self, name: str | None = None) -> tuple[str, dict[str, Any]] | None:
+        """Load a safe browser payload, reusing recent reports between requests."""
+
+        selected = name
+        if selected is None:
+            available = self.names()
+            selected = available[0] if available else None
+        if selected is None:
+            return None
+        self._safe_path(selected)
+        self.index()
+        with self._cache_lock:
+            cached = self._payload_cache.pop(selected, None)
+            if cached is not None:
+                self._payload_cache[selected] = cached
+                return selected, deepcopy(cached)
+
+            loaded = self.load(selected)
             if loaded is None:
-                continue
+                return None
             report_name, summary = loaded
-            total_fees = summary.portfolio.total_fees or sum(
-                (fill.fees for fill in summary.fill_events), Decimal("0")
-            )
-            entries.append(
-                {
-                    "name": report_name,
-                    "status": summary.status,
-                    "started_at": summary.started_at.isoformat(),
-                    "finished_at": summary.finished_at.isoformat(),
-                    "equity": str(summary.portfolio.equity or summary.portfolio.cash),
-                    "daily_pnl": str(summary.portfolio.daily_pnl),
-                    "fees": str(total_fees),
-                    "fills": summary.fills,
-                    "positions": len(summary.portfolio.positions),
-                    "open_orders": summary.portfolio.open_orders,
-                    "scenario_id": summary.run_config.get("scenario_id", "single"),
-                    "scenario_label": summary.run_config.get("scenario_label", "単一条件"),
-                    "decision_mode": str(summary.run_config.get("decision_mode", "RULE")).upper(),
-                    "decision_label": summary.run_config.get("decision_label", "ルール判定"),
-                    "initial_capital": str(summary.portfolio.initial_capital),
-                    "jpy_capital": summary.run_config.get("jpy_capital"),
-                    "capital_constraint": summary.run_config.get("capital_constraint"),
-                    "usd_jpy_rate": summary.run_config.get("usd_jpy_rate"),
-                    "session_date": summary.started_at.astimezone(ZoneInfo("Asia/Tokyo"))
-                    .date()
-                    .isoformat(),
-                    "capital_key": _capital_condition_key(
-                        summary.portfolio.initial_capital,
-                        summary.run_config.get("capital_constraint"),
-                        summary.run_config.get("jpy_capital"),
-                    ),
-                    "capital_label": _capital_condition_label(
-                        scenario_id=str(summary.run_config.get("scenario_id", "single")),
-                        initial_capital=summary.portfolio.initial_capital,
-                        capital_constraint=summary.run_config.get("capital_constraint"),
-                        jpy_capital=summary.run_config.get("jpy_capital"),
-                    ),
-                }
-            )
-        return tuple(entries)
+            payload = dashboard_payload(report_name, summary)
+            self._payload_cache[report_name] = payload
+            while len(self._payload_cache) > 8:
+                self._payload_cache.pop(next(iter(self._payload_cache)))
+            return report_name, deepcopy(payload)
+
+    def warm(self) -> None:
+        """Populate read caches before the first browser request is served."""
+
+        entries = self.index()
+        valid_entries = [
+            entry
+            for entry in entries
+            if entry.get("status") != "INVALID"
+            and entry.get("session_date")
+            and entry.get("capital_key")
+        ]
+        dates = sorted(
+            {str(entry["session_date"]) for entry in valid_entries}, reverse=True
+        )
+        if dates:
+            newest_date = dates[0]
+            on_date = [
+                entry for entry in valid_entries if entry.get("session_date") == newest_date
+            ]
+            capital_keys = list(dict.fromkeys(str(entry["capital_key"]) for entry in on_date))
+            if capital_keys:
+                self.comparison_pair(newest_date, capital_keys[0])
+        self.cost_summary()
 
     def comparison_pair(self, session_date: str, capital_key: str) -> dict[str, Any]:
         """Load the newest valid RULE and JEV reports for one exact condition."""
@@ -147,9 +233,9 @@ class ReportStore:
                 reverse=True,
             )
             if candidates:
-                loaded = self.load(str(candidates[0]["name"]))
+                loaded = self.load_payload(str(candidates[0]["name"]))
                 if loaded is not None:
-                    result[key] = dashboard_payload(*loaded)
+                    result[key] = loaded[1]
         return result
 
     def cost_summary(
@@ -164,44 +250,54 @@ class ReportStore:
             timezone = ZoneInfo(timezone_name)
         except Exception as exc:
             raise DashboardReportError(f"invalid dashboard timezone: {timezone_name}") from exc
-        records = self._usage_records()
-        if records:
-            anchor = max(record.occurred_at for record in records).astimezone(timezone)
-        else:
-            current = reference_time or datetime.now(UTC)
-            if current.tzinfo is None or current.utcoffset() is None:
-                raise DashboardReportError("reference_time must be timezone-aware")
-            anchor = current.astimezone(timezone)
-        anchor_date = anchor.date()
-        day_start = anchor_date
-        week_start = anchor_date - timedelta(days=anchor_date.weekday())
-        month_start = anchor_date.replace(day=1)
+        signature = self._file_signature("*.json")
+        cache_key = (signature, timezone_name, reference_time)
+        with self._cache_lock:
+            if self._cost_cache_key == cache_key and self._cost_cache is not None:
+                return deepcopy(self._cost_cache)
 
-        def period_payload(start: date, end: date) -> dict[str, Any]:
-            selected = tuple(
-                record
-                for record in records
-                if start <= record.occurred_at.astimezone(timezone).date() < end
+            records = self._usage_records()
+            if records:
+                anchor = max(record.occurred_at for record in records).astimezone(timezone)
+            else:
+                current = reference_time or datetime.now(UTC)
+                if current.tzinfo is None or current.utcoffset() is None:
+                    raise DashboardReportError("reference_time must be timezone-aware")
+                anchor = current.astimezone(timezone)
+            anchor_date = anchor.date()
+            day_start = anchor_date
+            week_start = anchor_date - timedelta(days=anchor_date.weekday())
+            month_start = anchor_date.replace(day=1)
+
+            def period_payload(start: date, end: date) -> dict[str, Any]:
+                selected = tuple(
+                    record
+                    for record in records
+                    if start <= record.occurred_at.astimezone(timezone).date() < end
+                )
+                summary = summarize_usage(selected)
+                payload = summary.model_dump(mode="json")
+                payload["period_start"] = start.isoformat()
+                payload["period_end"] = (end - timedelta(days=1)).isoformat()
+                return payload
+
+            next_month = (
+                month_start.replace(year=month_start.year + 1, month=1)
+                if month_start.month == 12
+                else month_start.replace(month=month_start.month + 1)
             )
-            summary = summarize_usage(selected)
-            payload = summary.model_dump(mode="json")
-            payload["period_start"] = start.isoformat()
-            payload["period_end"] = (end - timedelta(days=1)).isoformat()
-            return payload
-
-        next_month = (
-            month_start.replace(year=month_start.year + 1, month=1)
-            if month_start.month == 12
-            else month_start.replace(month=month_start.month + 1)
-        )
-        return {
-            "timezone": timezone_name,
-            "anchor_at": anchor.isoformat(),
-            "pricing": self._pricing_metadata(),
-            "daily": period_payload(day_start, day_start + timedelta(days=1)),
-            "weekly": period_payload(week_start, week_start + timedelta(days=7)),
-            "monthly": period_payload(month_start, next_month),
-        }
+            payload = {
+                "timezone": timezone_name,
+                "anchor_at": anchor.isoformat(),
+                "pricing": self._pricing_metadata(),
+                "daily": period_payload(day_start, day_start + timedelta(days=1)),
+                "weekly": period_payload(week_start, week_start + timedelta(days=7)),
+                "monthly": period_payload(month_start, next_month),
+            }
+            if records or reference_time is not None:
+                self._cost_cache_key = cache_key
+                self._cost_cache = payload
+            return deepcopy(payload)
 
     def _pricing_metadata(self) -> dict[str, Any]:
         configurations: dict[tuple[str | None, str | None, str | None, str], dict[str, Any]] = {}
@@ -566,6 +662,7 @@ def create_server(
     """Create a local dashboard HTTP server without starting its event loop."""
 
     store = ReportStore(report_dir)
+    store.warm()
 
     class DashboardHandler(BaseHTTPRequestHandler):
         server_version = "TraderJevDashboard/1.0"
@@ -589,12 +686,12 @@ def create_server(
                 elif request.path in {"/api/latest", "/api/report"}:
                     query = parse_qs(request.query)
                     requested = query.get("name", [None])[0]
-                    loaded = store.load(requested)
+                    loaded = store.load_payload(requested)
                     if loaded is None:
                         self._send_json({"error": "no reports found"}, status=404)
                     else:
-                        name, summary = loaded
-                        self._send_json(dashboard_payload(name, summary))
+                        _name, payload = loaded
+                        self._send_json(payload)
                 else:
                     self._send_json({"error": "not found"}, status=404)
             except DashboardReportError as exc:

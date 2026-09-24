@@ -462,6 +462,11 @@ def test_dashboard_html_has_overview_sections_without_top_level_mode_selector() 
     assert 'id="decision-funnel"' in DASHBOARD_HTML
     assert 'id="recent-trades"' in DASHBOARD_HTML
     assert 'id="mode-select"' not in DASHBOARD_HTML
+    assert 'aria-label="ペーパー運用の成績"' in DASHBOARD_HTML
+    assert "正味損益（米ドル）" in DASHBOARD_HTML
+    assert "決済済み取引の累積損益" in DASHBOARD_HTML
+    assert "Approved orders" not in DASHBOARD_HTML
+    assert "Unrealized PnL" not in DASHBOARD_HTML
 
 
 def test_report_store_aggregates_jev_cost_by_period(tmp_path: Path) -> None:

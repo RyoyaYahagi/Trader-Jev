@@ -508,20 +508,20 @@ def _capital_condition_label(
     if yen_amount is not None:
         amount = _format_capital_amount(Decimal(yen_amount))
         if constraint is None:
-            return f"制約なし · {amount}円相当 · USD {_format_capital_amount(initial_capital)}"
-        condition = f"{amount}円制約 · USD上限 {constraint}"
+            return f"制約なし · {amount}円相当 · 米ドル {_format_capital_amount(initial_capital)}"
+        condition = f"{amount}円制約 · 米ドル上限 {constraint}"
         if Decimal(constraint) != initial_capital:
-            condition += f" · 初期 {_format_capital_amount(initial_capital)} USD"
+            condition += f" · 初期資金 {_format_capital_amount(initial_capital)}米ドル"
         return condition
     if constraint is None:
         if scenario_id.startswith("unconstrained"):
-            return f"制約なし · 初期 USD {_format_capital_amount(initial_capital)}"
+            return f"制約なし · 初期資金 {_format_capital_amount(initial_capital)}米ドル"
         if scenario_id == "single":
-            return f"単一条件 · USD {_format_capital_amount(initial_capital)}"
-        return f"資金上限なし · USD {_format_capital_amount(initial_capital)}"
-    condition = f"USD {_format_capital_amount(Decimal(constraint))}制約"
+            return f"単一条件 · 米ドル {_format_capital_amount(initial_capital)}"
+        return f"資金上限なし · 米ドル {_format_capital_amount(initial_capital)}"
+    condition = f"米ドル {_format_capital_amount(Decimal(constraint))}制約"
     if Decimal(constraint) != initial_capital:
-        condition += f" · 初期 USD {_format_capital_amount(initial_capital)}"
+        condition += f" · 初期資金 {_format_capital_amount(initial_capital)}米ドル"
     return condition
 
 
@@ -750,7 +750,7 @@ DASHBOARD_HTML = """<!doctype html>
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Trader-Jev Paper Dashboard</title>
+  <title>Trader-Jev 米国株ペーパー運用ダッシュボード</title>
   <style>
     :root { color-scheme: dark; --bg: #0d1420; --panel: #111a27; --panel-raised: #151f2e; --line: #273344; --text: #e3e9f0; --muted: #99a7b8; --good: #61c58a; --warn: #e2b75e; --bad: #e7777d; --accent: #79aaf2; }
     * { box-sizing: border-box; }
@@ -835,7 +835,7 @@ DASHBOARD_HTML = """<!doctype html>
   <header>
     <div class="brand">
       <h1>Trader-Jev</h1>
-      <div class="badges" aria-label="実行環境"><span>PAPER</span><span>US</span><span>READ ONLY</span></div>
+      <div class="badges" aria-label="実行環境"><span>ペーパー運用</span><span>米国市場</span><span>読み取り専用</span></div>
     </div>
     <div class="toolbar">
       <div class="filter"><label for="date-select">開始日</label><select id="date-select" aria-label="開始日"></select></div>
@@ -845,27 +845,27 @@ DASHBOARD_HTML = """<!doctype html>
     </div>
   </header>
   <div id="run-meta" class="run-meta">レポートを読み込んでいます...</div>
-  <ul id="alerts" class="alert-list" hidden aria-label="Alerts"></ul>
+  <ul id="alerts" class="alert-list" hidden aria-label="警告とエラー"></ul>
   <div id="empty-state" class="empty-state" hidden role="status">条件に一致する有効なレポートがありません。</div>
   <div id="dashboard-content" hidden>
     <div id="missing-branch" class="empty-state" hidden role="status"></div>
-    <section class="kpis" aria-label="Paper portfolio performance">
-      <div class="kpi"><div class="kpi-label">Net PnL · USD</div><div id="kpi-net-pnl" class="kpi-value">—</div></div>
-      <div class="kpi"><div class="kpi-label">Return</div><div id="kpi-return" class="kpi-value">—</div></div>
-      <div class="kpi"><div class="kpi-label">Equity · USD</div><div id="kpi-equity" class="kpi-value">—</div></div>
-      <div class="kpi"><div class="kpi-label">Max Drawdown · USD</div><div id="kpi-drawdown" class="kpi-value">—</div></div>
-      <div class="kpi"><div class="kpi-label">Closed trades</div><div id="kpi-trades" class="kpi-value">—</div></div>
-      <div class="kpi"><div class="kpi-label">Fees · USD</div><div id="kpi-fees" class="kpi-value">—</div></div>
+    <section class="kpis" aria-label="ペーパー運用の成績">
+      <div class="kpi"><div class="kpi-label">正味損益（米ドル）</div><div id="kpi-net-pnl" class="kpi-value">—</div></div>
+      <div class="kpi"><div class="kpi-label">収益率</div><div id="kpi-return" class="kpi-value">—</div></div>
+      <div class="kpi"><div class="kpi-label">資産評価額（米ドル）</div><div id="kpi-equity" class="kpi-value">—</div></div>
+      <div class="kpi"><div class="kpi-label">最大ドローダウン（米ドル）</div><div id="kpi-drawdown" class="kpi-value">—</div></div>
+      <div class="kpi"><div class="kpi-label">決済済み取引数</div><div id="kpi-trades" class="kpi-value">—</div></div>
+      <div class="kpi"><div class="kpi-label">手数料（米ドル）</div><div id="kpi-fees" class="kpi-value">—</div></div>
     </section>
     <div id="kpi-context" class="kpi-context"></div>
     <div class="layout">
       <section class="panel wide" id="rule-jev-comparison">
-        <div class="section-heading"><h2>Rule vs Jev</h2><span class="subtle">同じ開始日・資金条件の最新レポート</span></div>
+        <div class="section-heading"><h2>ルール判定とJev判定の比較</h2><span class="subtle">同じ開始日・資金条件の最新レポート</span></div>
         <div id="comparison-table" class="table-scroll"></div>
-        <div class="note">Δ は Jev − Rule の単純差です。Gross profit・loss・profit factor は、手数料控除後の closed trade net PnL から算出します。比較対象がない値は — で表示します。</div>
+        <div class="note">金額の単位は米ドルです。差は Jev判定 − ルール判定の単純差です。利益・損失の集計と損益比率は、手数料控除後の決済済み取引損益から算出します。比較対象がない値は — で表示します。</div>
       </section>
       <section class="panel">
-        <h2>Cumulative realized net PnL</h2>
+        <h2>決済済み取引の累積損益（手数料控除後・米ドル）</h2>
         <div id="pnl-chart" aria-live="polite"></div>
       </section>
       <section class="panel">
@@ -877,7 +877,7 @@ DASHBOARD_HTML = """<!doctype html>
         <div id="positions" class="table-scroll"></div>
       </section>
       <section class="panel">
-        <h2>Jev利用費</h2>
+        <h2>Jevの利用量と料金</h2>
         <div id="jev-cost-summary" class="cost-summary"></div>
         <div id="jev-cost-note" class="note"></div>
         <details>
@@ -902,14 +902,14 @@ const $ = (id) => document.getElementById(id);
 const money = (value) => {
   if (value === null || value === undefined || value === '') return '—';
   const n = Number(value);
-  return Number.isFinite(n) ? n.toLocaleString('en-US', {minimumFractionDigits: 2, maximumFractionDigits: 2}) : '—';
+  return Number.isFinite(n) ? n.toLocaleString('ja-JP', {minimumFractionDigits: 2, maximumFractionDigits: 2}) : '—';
 };
 const yen = (value) => {
   if (value === null || value === undefined || value === '') return '—';
   const n = Number(value);
   return Number.isFinite(n) ? n.toLocaleString('ja-JP', {maximumFractionDigits: 0}) : '—';
 };
-const integer = (value) => value === null || value === undefined || value === '' ? '—' : Number.isFinite(Number(value)) ? Number(value).toLocaleString('en-US') : '—';
+const integer = (value) => value === null || value === undefined || value === '' ? '—' : Number.isFinite(Number(value)) ? Number(value).toLocaleString('ja-JP') : '—';
 const signed = (value) => {
   if (value === null || value === undefined || value === '') return '—';
   const n = Number(value);
@@ -920,6 +920,26 @@ const percent = (ratio) => {
   const n = Number(ratio);
   return Number.isFinite(n) ? `${(n * 100).toFixed(2)}%` : '—';
 };
+const modeLabel = (mode) => mode === 'RULE' ? 'ルール判定' : mode === 'JEV' ? 'Jev判定' : String(mode || '—');
+const statusLabel = (status) => ({COMPLETED: '完了', FAILED: '失敗'})[status] || status || '不明';
+const sideLabel = (side) => ({LONG: '買い', SHORT: '売り', BUY: '買い', SELL: '売り', HOLD: '見送り'})[side] || side || '—';
+const positionSideLabel = (side) => side === 'LONG' ? '買建' : side === 'SHORT' ? '売建' : side || '—';
+const currencyLabel = (currency) => ({USD: '米ドル', JPY: '円', EUR: 'ユーロ', GBP: '英ポンド', CNY: '人民元'})[currency] || currency || '通貨不明';
+function formatDateOnly(value) {
+  if (!value) return '—';
+  const date = new Date(`${value}T00:00:00+09:00`);
+  return Number.isNaN(date.getTime()) ? String(value) : date.toLocaleDateString('ja-JP', {timeZone: 'Asia/Tokyo', year: 'numeric', month: 'long', day: 'numeric'});
+}
+function formatDateTime(value) {
+  if (!value) return '—';
+  const date = new Date(value);
+  return Number.isNaN(date.getTime()) ? String(value) : date.toLocaleString('ja-JP', {timeZone: 'Asia/Tokyo'});
+}
+function formatChartTime(value) {
+  if (!value) return '';
+  const date = new Date(value);
+  return Number.isNaN(date.getTime()) ? String(value).slice(0, 16).replace('T', ' ') : date.toLocaleString('ja-JP', {timeZone: 'Asia/Tokyo', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit'});
+}
 const valueClass = (value) => Number(value) > 0 ? 'positive' : Number(value) < 0 ? 'negative' : '';
 const cell = (row, value, cls = '') => {
   const element = document.createElement('td');
@@ -961,17 +981,17 @@ function metricValue(report, metric) {
 }
 function renderComparison(rule, jev) {
   const definitions = [
-    ['net_pnl', 'Net PnL'], ['return', 'Return'], ['win_rate', 'Win rate'],
-    ['average_trade', 'Average trade'], ['max_drawdown', 'Max drawdown'],
-    ['trades', 'Trades'], ['risk_rejects', 'Risk rejects'], ['fees', 'Fees'],
-    ['gross_profit', 'Gross profit'], ['gross_loss', 'Gross loss'], ['profit_factor', 'Profit factor'],
+    ['net_pnl', '正味損益（米ドル）'], ['return', '収益率'], ['win_rate', '勝率'],
+    ['average_trade', '1取引あたりの平均損益（米ドル）'], ['max_drawdown', '最大ドローダウン（米ドル）'],
+    ['trades', '決済済み取引数'], ['risk_rejects', 'リスク却下数'], ['fees', '手数料（米ドル）'],
+    ['gross_profit', '利益取引の損益合計（米ドル）'], ['gross_loss', '損失取引の損益合計（米ドル）'], ['profit_factor', 'プロフィットファクター'],
   ];
   const rows = definitions.map(([key, label]) => {
     const ruleValue = metricValue(rule, key); const jevValue = metricValue(jev, key);
     const delta = ruleValue === null || jevValue === null ? '—' : formatMetric(key, Number(jevValue) - Number(ruleValue));
     return [label, formatMetric(key, ruleValue), formatMetric(key, jevValue), delta];
   });
-  $('comparison-table').replaceChildren(table(['Metric', 'Rule', 'Jev', 'Δ'], rows));
+  $('comparison-table').replaceChildren(table(['指標', 'ルール判定', 'Jev判定', '差'], rows));
 }
 function renderKpis(report, mode) {
   const portfolio = report.portfolio || {}; const pnl = report.pnl || {}; const performance = report.performance || {};
@@ -982,16 +1002,16 @@ function renderKpis(report, mode) {
   setKpi('kpi-drawdown', money(portfolio.drawdown));
   setKpi('kpi-trades', integer(performance.closed_trade_count));
   setKpi('kpi-fees', money(pnl.fees ?? portfolio.total_fees));
-  $('kpi-context').textContent = `KPI対象レポート: ${mode}`;
+  $('kpi-context').textContent = `集計対象レポート: ${modeLabel(mode)}`;
 }
 function renderAlerts(reports, invalidReportCount = 0) {
   const list = $('alerts'); list.replaceChildren();
   const messages = [];
   reports.forEach(({mode, report}) => {
     if (!report) return;
-    (report.alerts || []).forEach((message) => messages.push(`${mode}: ${message}`));
-    if (Number(report.pipeline_failures || 0) > 0) messages.push(`${mode}: pipeline failures ${integer(report.pipeline_failures)}`);
-    if (report.status !== 'COMPLETED' && !(report.errors || []).length) messages.push(`${mode}: report status ${report.status}`);
+    (report.alerts || []).forEach((message) => messages.push(`${modeLabel(mode)}：${message}`));
+    if (Number(report.pipeline_failures || 0) > 0) messages.push(`${modeLabel(mode)}：処理失敗 ${integer(report.pipeline_failures)}件`);
+    if (report.status !== 'COMPLETED' && !(report.errors || []).length) messages.push(`${modeLabel(mode)}：レポート状態 ${statusLabel(report.status)}`);
   });
   if (invalidReportCount > 0) messages.push(`読み込めないレポートが${integer(invalidReportCount)}件あります`);
   if (!messages.length) { list.hidden = true; return; }
@@ -1002,14 +1022,14 @@ function renderFunnel(rule, jev) {
   const root = $('decision-funnel'); root.replaceChildren();
   for (const [mode, report] of [['RULE', rule], ['JEV', jev]]) {
     const branch = document.createElement('div'); branch.className = 'funnel-branch';
-    const heading = document.createElement('h3'); heading.textContent = mode; branch.appendChild(heading);
+    const heading = document.createElement('h3'); heading.textContent = modeLabel(mode); branch.appendChild(heading);
     if (!report) {
       const empty = document.createElement('div'); empty.className = 'empty';
-      empty.textContent = mode === 'JEV' ? 'この条件のJevレポートはまだありません' : 'この条件のRuleレポートはまだありません';
+      empty.textContent = mode === 'JEV' ? 'この条件のJevレポートはまだありません' : 'この条件のルール判定レポートはまだありません';
       branch.appendChild(empty); root.appendChild(branch); continue;
     }
     const stages = document.createElement('div'); stages.className = 'funnel-stages';
-    const counts = [['Decisions', report.decisions], ['Approved orders', report.approved_orders], ['Fills', report.fills]];
+    const counts = [['判断回数', report.decisions], ['承認済み注文数', report.approved_orders], ['約定数', report.fills]];
     counts.forEach(([label, count], index) => {
       if (index) { const arrow = document.createElement('span'); arrow.className = 'funnel-arrow'; arrow.textContent = '↓'; stages.appendChild(arrow); }
       const stage = document.createElement('div'); stage.className = 'funnel-stage';
@@ -1019,16 +1039,16 @@ function renderFunnel(rule, jev) {
     });
     branch.appendChild(stages);
     const other = document.createElement('div'); other.className = 'funnel-other';
-    other.textContent = `HOLD ${integer(report.holds)} · Risk rejections ${integer(report.risk_rejections)} · Pipeline failures ${integer(report.pipeline_failures)}`;
+    other.textContent = `見送り ${integer(report.holds)}件 · リスク却下 ${integer(report.risk_rejections)}件 · 処理失敗 ${integer(report.pipeline_failures)}件`;
     branch.appendChild(other); root.appendChild(branch);
   }
 }
 function renderPositions(reports) {
   const rows = [];
   reports.forEach(({mode, report}) => (report?.positions || []).forEach((position) => {
-    rows.push([mode, position.symbol, position.side, integer(position.quantity), money(position.average_price), money(position.current_price), [signed(position.unrealized_pnl), valueClass(position.unrealized_pnl)]]);
+    rows.push([modeLabel(mode), position.symbol, positionSideLabel(position.side), integer(position.quantity), money(position.average_price), money(position.current_price), [signed(position.unrealized_pnl), valueClass(position.unrealized_pnl)]]);
   }));
-  $('positions').replaceChildren(table(['Rule/Jev', 'Symbol', 'Side', 'Quantity', 'Average', 'Current', 'Unrealized PnL'], rows, 'Open positionなし'));
+  $('positions').replaceChildren(table(['判定方式', '銘柄', '売買', '数量', '平均取得単価（米ドル）', '現在値（米ドル）', '未実現損益（米ドル）'], rows, '保有ポジションはありません'));
 }
 function duration(seconds) {
   const value = Number(seconds);
@@ -1045,12 +1065,12 @@ function renderTrades(reports) {
   currentTradeRows = records;
   const shown = showAllTrades ? records : records.slice(0, 10);
   const rows = shown.map(({mode, trade}) => [
-    trade.exit_timestamp || trade.timestamp || '—', trade.symbol || '—', mode,
-    trade.closed ? 'Closed' : 'Open', trade.side || '—', integer(trade.quantity),
+    formatDateTime(trade.exit_timestamp || trade.timestamp), trade.symbol || '—', modeLabel(mode),
+    trade.closed ? '決済済み' : '保有中', sideLabel(trade.side), integer(trade.quantity),
     money(trade.entry_price), money(trade.exit_price), money(trade.fees),
     [signed(trade.net_pnl), valueClass(trade.net_pnl)], duration(trade.holding_duration_seconds),
   ]);
-  $('recent-trades').replaceChildren(table(['Timestamp', 'Symbol', 'Rule/Jev', 'Status', 'Side', 'Quantity', 'Entry', 'Exit', 'Fees', 'Net PnL', 'Holding'], rows));
+  $('recent-trades').replaceChildren(table(['日時', '銘柄', '判定方式', '状態', '売買', '数量', '新規価格（米ドル）', '決済価格（米ドル）', '手数料（米ドル）', '正味損益（米ドル）', '保有時間'], rows));
   $('trade-caption').textContent = showAllTrades ? `全${integer(records.length)}件` : '最新10件まで';
   const toggle = $('trade-toggle'); toggle.hidden = records.length <= 10;
   toggle.textContent = showAllTrades ? '最新10件に戻す' : `すべて表示（${integer(records.length)}件）`;
@@ -1065,7 +1085,7 @@ function renderChart(report) {
   const series = (report?.performance?.cumulative_realized_net_pnl || []).filter((point) => Number.isFinite(Number(point.cumulative_net_pnl)));
   if (series.length < 2) {
     const empty = document.createElement('div'); empty.className = 'empty';
-    empty.textContent = series.length === 1 ? `決済済み取引が1件のため推移線を表示できません。累積損益: ${signed(series[0].cumulative_net_pnl)} USD` : '決済済み取引がありません';
+    empty.textContent = series.length === 1 ? `決済済み取引が1件のため推移線を表示できません。累積損益: ${signed(series[0].cumulative_net_pnl)}米ドル` : '決済済み取引がありません';
     root.appendChild(empty); return;
   }
   const width = 720; const height = 260; const padX = 42; const padY = 24;
@@ -1073,24 +1093,25 @@ function renderChart(report) {
   const min = Math.min(0, ...values); const max = Math.max(0, ...values); const span = max - min || 1;
   const x = (index) => padX + (index / (values.length - 1)) * (width - padX * 2);
   const y = (value) => height - padY - ((value - min) / span) * (height - padY * 2);
-  const svg = svgNode('svg', {viewBox: `0 0 ${width} ${height}`, role: 'img', 'aria-label': 'Cumulative realized net PnL'});
+  const svg = svgNode('svg', {viewBox: `0 0 ${width} ${height}`, role: 'img', 'aria-label': '決済済み取引の累積損益'});
   const baseline = svgNode('line', {x1: padX, x2: width - padX, y1: y(0), y2: y(0), class: 'gridline'}); svg.appendChild(baseline);
   const topLabel = svgNode('text', {x: 0, y: padY + 4}); topLabel.textContent = signed(max); svg.appendChild(topLabel);
   const bottomLabel = svgNode('text', {x: 0, y: height - padY}); bottomLabel.textContent = signed(min); svg.appendChild(bottomLabel);
   const path = values.map((value, index) => `${index ? 'L' : 'M'} ${x(index)} ${y(value)}`).join(' ');
   const curve = svgNode('path', {d: path, class: 'curve', stroke: values[values.length - 1] >= 0 ? 'var(--good)' : 'var(--bad)'}); svg.appendChild(curve);
   const last = svgNode('circle', {cx: x(values.length - 1), cy: y(values[values.length - 1]), r: 4, class: 'last-point', fill: values[values.length - 1] >= 0 ? 'var(--good)' : 'var(--bad)'}); svg.appendChild(last);
-  const firstDate = svgNode('text', {x: padX, y: height - 2}); firstDate.textContent = String(series[0].timestamp || '').slice(0, 16).replace('T', ' '); svg.appendChild(firstDate);
-  const lastDate = svgNode('text', {x: width - padX, y: height - 2, 'text-anchor': 'end'}); lastDate.textContent = String(series[series.length - 1].timestamp || '').slice(0, 16).replace('T', ' '); svg.appendChild(lastDate);
+  const firstDate = svgNode('text', {x: padX, y: height - 2}); firstDate.textContent = formatChartTime(series[0].timestamp); svg.appendChild(firstDate);
+  const lastDate = svgNode('text', {x: width - padX, y: height - 2, 'text-anchor': 'end'}); lastDate.textContent = formatChartTime(series[series.length - 1].timestamp); svg.appendChild(lastDate);
   svg.classList.add('chart'); root.appendChild(svg);
 }
 function costAmount(item, pricing) {
-  if (!item || Number(item.request_count) === 0) return 'Jev呼出なし';
+  if (!item || Number(item.request_count) === 0) return 'Jevの呼び出しなし';
   if (item.estimated_cost === null || item.estimated_cost === undefined) {
     return Number(item.unpriced_request_count || 0) > 0 ? '未計上' : pricing.status === 'UNAVAILABLE' ? '単価未設定' : '算出不可';
   }
   const prefix = item.cost_status === 'PROVIDER_REPORTED' ? '' : '推定 ';
-  return `${prefix}${money(item.estimated_cost)} ${item.currency || 'USD'}`;
+  const currency = currencyLabel(item.currency);
+  return `${prefix}${money(item.estimated_cost)} ${currency}`;
 }
 function costItem(label, value) {
   const wrapper = document.createElement('div'); wrapper.className = 'cost-item';
@@ -1099,29 +1120,30 @@ function costItem(label, value) {
   wrapper.append(title, content); return wrapper;
 }
 function renderCosts(data) {
-  if (!data) { $('jev-cost-summary').replaceChildren(); $('jev-costs').replaceChildren(); $('jev-cost-note').textContent = 'Jev利用費を取得できませんでした。'; return; }
+  if (!data) { $('jev-cost-summary').replaceChildren(); $('jev-costs').replaceChildren(); $('jev-cost-note').textContent = 'Jevの利用料金を取得できませんでした。'; return; }
   const pricing = data.pricing || {}; const daily = data.daily || {};
-  const dateLabel = daily.period_start || '最新利用日';
+  const dateLabel = daily.period_start ? formatDateOnly(daily.period_start) : '最新利用日';
   $('jev-cost-summary').replaceChildren(
-    costItem(`${dateLabel}の呼出回数`, integer(daily.request_count)),
-    costItem(`${dateLabel}のトークン数`, integer(daily.total_tokens)),
+    costItem(`${dateLabel}の呼び出し回数`, integer(daily.request_count)),
+    costItem(`${dateLabel}の利用トークン数`, integer(daily.total_tokens)),
     costItem(`${dateLabel}の推定料金`, costAmount(daily, pricing)),
   );
-  $('jev-cost-note').textContent = `最新利用日を集計しています。未計上の呼出: ${integer(daily.unpriced_request_count)}件。料金が算出できない場合は0 USDに置き換えません。`;
+  $('jev-cost-note').textContent = `最新利用日を集計しています。未計上の呼び出し: ${integer(daily.unpriced_request_count)}件。料金が算出できない場合も0円とは表示しません。`;
+  const pricingCurrency = currencyLabel(pricing.currency);
   const pricingNote = pricing.status === 'CONFIGURED'
-    ? `設定単価: 入力 ${pricing.input_usd_per_1k_tokens ?? '未設定'} ${pricing.currency} / 1,000トークン、出力 ${pricing.output_usd_per_1k_tokens ?? '未設定'} ${pricing.currency} / 1,000トークン。`
-    : pricing.status === 'MULTIPLE' ? '複数の単価設定があり、料金は呼出時の単価で計算した見積額です。' : 'レポートに単価設定がありません。料金は算出できず、未計上呼出は費用に含めません。';
+    ? `設定単価: 入力 ${pricing.input_usd_per_1k_tokens ?? '未設定'} ${pricingCurrency} / 千トークン、出力 ${pricing.output_usd_per_1k_tokens ?? '未設定'} ${pricingCurrency} / 千トークン。`
+    : pricing.status === 'MULTIPLE' ? '複数の単価設定があります。料金は各呼び出し時の単価で計算した見積額です。' : 'レポートに単価設定がありません。料金は算出できず、未計上の呼び出し分は費用に含めません。';
   $('jev-cost-note').textContent += ` ${pricingNote}`;
   const periods = [['daily', '日次'], ['weekly', '週次'], ['monthly', '月次']];
   const rows = periods.map(([key, label]) => {
     const item = data[key] || {};
-    return [label, `${item.period_start || '—'} ～ ${item.period_end || '—'}`, integer(item.request_count), integer(item.input_tokens), integer(item.output_tokens), integer(item.total_tokens), integer(item.unpriced_request_count), costAmount(item, pricing)];
+    return [label, `${formatDateOnly(item.period_start)} ～ ${formatDateOnly(item.period_end)}`, integer(item.request_count), integer(item.input_tokens), integer(item.output_tokens), integer(item.total_tokens), integer(item.unpriced_request_count), costAmount(item, pricing)];
   });
-  $('jev-costs').replaceChildren(table(['期間', '対象日', '呼出回数', '入力トークン', '出力トークン', '合計トークン', '未計上', '料金'], rows));
+  $('jev-costs').replaceChildren(table(['期間', '対象日', '呼び出し回数', '入力トークン', '出力トークン', '合計トークン', '未計上', '料金'], rows));
 }
 function statusText(rule, jev) {
   const branches = [['RULE', rule], ['JEV', jev]].filter(([, report]) => report);
-  return branches.map(([mode, report]) => `${mode} ${report.status}`).join(' · ');
+  return branches.map(([mode, report]) => `${modeLabel(mode)}：${statusLabel(report.status)}`).join(' · ');
 }
 function render(pair, selection) {
   const rule = pair.rule; const jev = pair.jev; const primary = jev || rule;
@@ -1130,15 +1152,15 @@ function render(pair, selection) {
   $('missing-branch').hidden = !primary || Boolean(rule && jev);
   if (!primary) {
     $('run-meta').textContent = '選択した開始日・資金条件のレポートはありません。';
-    $('status').textContent = 'REPORT NOT FOUND'; $('status').className = 'status empty';
+    $('status').textContent = 'レポートなし'; $('status').className = 'status empty';
     renderAlerts([], selection.invalidReportCount || 0); return;
   }
   const missing = $('missing-branch');
-  missing.textContent = rule ? 'この条件のJevレポートはまだありません' : 'この条件のRuleレポートはまだありません';
+  missing.textContent = rule ? 'この条件のJevレポートはまだありません' : 'この条件のルール判定レポートはまだありません';
   const selectedMode = jev ? 'JEV' : 'RULE';
   const condition = primary.capital_condition || {};
-  const capitalLimit = condition.capital_constraint === null || condition.capital_constraint === undefined ? '資金上限なし' : `USD上限 ${money(condition.capital_constraint)}`;
-  $('run-meta').textContent = `${selection.capitalLabel} · ${selection.date} · 初期資金 ${money(condition.initial_capital)} USD · ${capitalLimit} · ${primary.started_at} ～ ${primary.finished_at}`;
+  const capitalLimit = condition.capital_constraint === null || condition.capital_constraint === undefined ? '資金上限なし' : `米ドル上限 ${money(condition.capital_constraint)}`;
+  $('run-meta').textContent = `${selection.capitalLabel} · 開始日 ${formatDateOnly(selection.date)} · 初期資金 ${money(condition.initial_capital)}米ドル · ${capitalLimit} · 実行 ${formatDateTime(primary.started_at)} ～ ${formatDateTime(primary.finished_at)}`;
   const status = $('status'); status.textContent = statusText(rule, jev); status.className = `status ${[rule, jev].some((report) => report && report.status !== 'COMPLETED') ? 'failed' : 'good'}`;
   renderKpis(primary, selectedMode);
   renderComparison(rule, jev);
@@ -1151,8 +1173,8 @@ function render(pair, selection) {
   const fills = [];
   reports.forEach(({mode, report}) => (report?.fill_events || []).forEach((fill) => fills.push({mode, fill})));
   fills.sort((left, right) => Date.parse(right.fill.occurred_at || '') - Date.parse(left.fill.occurred_at || ''));
-  const fillRows = fills.map(({mode, fill}) => [fill.occurred_at || '—', fill.instrument?.symbol || '—', mode, fill.side || '—', integer(fill.quantity), money(fill.price), money(fill.fees), fill.fee_breakdown?.currency || fill.instrument?.currency || '—']);
-  $('fills-table').replaceChildren(table(['Timestamp', 'Symbol', 'Rule/Jev', 'Side', 'Quantity', 'Price', 'Fee', 'Currency'], fillRows));
+  const fillRows = fills.map(({mode, fill}) => [formatDateTime(fill.occurred_at), fill.instrument?.symbol || '—', modeLabel(mode), sideLabel(fill.side), integer(fill.quantity), money(fill.price), money(fill.fees), currencyLabel(fill.fee_breakdown?.currency || fill.instrument?.currency)]);
+  $('fills-table').replaceChildren(table(['日時', '銘柄', '判定方式', '売買', '数量', '約定価格（米ドル）', '手数料（米ドル）', '通貨'], fillRows));
 }
 function fillSelect(id, options, selectedKey) {
   const select = $(id); select.replaceChildren();
@@ -1170,7 +1192,7 @@ async function load() {
     const entries = reports.filter((report) => report.status !== 'INVALID' && report.started_at && report.capital_key);
     const previousDate = $('date-select').value; const previousCapital = $('capital-select').value;
     const dates = [...new Set(entries.map((report) => report.session_date).filter(Boolean))].sort().reverse();
-    const date = fillSelect('date-select', dates.map((value) => ({key: value, label: value})), previousDate);
+    const date = fillSelect('date-select', dates.map((value) => ({key: value, label: formatDateOnly(value)})), previousDate);
     const onDate = entries.filter((report) => report.session_date === date);
     const capitals = new Map();
     onDate.forEach((report) => capitals.set(report.capital_key, {key: report.capital_key, label: report.capital_label || report.scenario_label || '資金条件'}));
@@ -1192,8 +1214,8 @@ async function load() {
     $('last-updated').textContent = `最終更新 ${new Date().toLocaleTimeString('ja-JP', {hour: '2-digit', minute: '2-digit', second: '2-digit'})}`;
   } catch (error) {
     $('empty-state').hidden = true; $('dashboard-content').hidden = true;
-    $('status').textContent = 'ERROR'; $('status').className = 'status failed';
-    $('run-meta').textContent = String(error); $('last-updated').textContent = '最終更新 —';
+    $('status').textContent = 'エラー'; $('status').className = 'status failed';
+    $('run-meta').textContent = 'ダッシュボードの読み込みに失敗しました。通信状態を確認して再読み込みしてください。'; $('last-updated').textContent = '最終更新 —';
   }
 }
 ['date-select', 'capital-select'].forEach((id) => $(id).addEventListener('change', () => load()));

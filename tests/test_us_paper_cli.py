@@ -153,6 +153,10 @@ def test_config_rejects_inconsistent_final_blend_weights(tmp_path: Path) -> None
         )
 
 
+def test_universe_refresh_defaults_to_weekly() -> None:
+    assert USPaperConfig().universe_refresh_days == 7
+
+
 def _config(path: Path) -> USPaperConfig:
     return USPaperConfig(
         database_path=path,

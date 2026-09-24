@@ -80,7 +80,7 @@ class USPaperConfig(DomainModel):
     database_path: Path = Path("data/us_equity_paper.sqlite3")
     include_etf: bool = False
     include_otc: bool = False
-    universe_refresh_days: int = Field(default=1, ge=0)
+    universe_refresh_days: int = Field(default=7, ge=0)
     min_price_usd: Decimal = Field(default=Decimal("3"), gt=Decimal("0"))
     min_market_cap_usd: Decimal = Field(default=Decimal("300000000"), ge=Decimal("0"))
     min_avg_turnover_20d_usd: Decimal = Field(default=Decimal("10000000"), ge=Decimal("0"))

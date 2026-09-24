@@ -1,8 +1,8 @@
-"""Local read-only dashboard for Forward Paper JSON reports.
+"""Local read-only dashboard for Forward Paper reports and U.S. universe records.
 
 The server binds to localhost by default and never connects to OpenD, a broker,
-or an account API.  It reads the append-only session reports produced by
-``trader-jev-forward-paper`` and exposes a small HTML view plus JSON endpoints.
+or an account API. It reads Forward Paper reports and the universe Paper audit
+database in read-only mode, then exposes a local HTML view and JSON endpoints.
 """
 
 from __future__ import annotations
@@ -27,6 +27,7 @@ from trader_jev.forward_paper import ForwardPaperSummary
 from trader_jev.jev_usage import JevUsageRecord, JevUsageSummary, summarize_usage
 from trader_jev.logging import redact_sensitive
 from trader_jev.observability import TradeRecord
+from trader_jev.universe_dashboard import UniverseDashboardStore
 
 # The embedded HTML/CSS/JavaScript is intentionally kept in one local asset.
 # Ruff's line-length check is not useful inside that browser asset.
@@ -48,9 +49,9 @@ class ReportStore:
         self._index_signature: tuple[tuple[str, int, int, int], ...] | None = None
         self._index_cache: tuple[dict[str, Any], ...] = ()
         self._payload_cache: dict[str, dict[str, Any]] = {}
-        self._cost_cache_key: tuple[
-            tuple[tuple[str, int, int, int], ...], str, datetime | None
-        ] | None = None
+        self._cost_cache_key: (
+            tuple[tuple[tuple[str, int, int, int], ...], str, datetime | None] | None
+        ) = None
         self._cost_cache: dict[str, Any] | None = None
 
     def _file_signature(self, pattern: str) -> tuple[tuple[str, int, int, int], ...]:
@@ -195,14 +196,10 @@ class ReportStore:
             and entry.get("session_date")
             and entry.get("capital_key")
         ]
-        dates = sorted(
-            {str(entry["session_date"]) for entry in valid_entries}, reverse=True
-        )
+        dates = sorted({str(entry["session_date"]) for entry in valid_entries}, reverse=True)
         if dates:
             newest_date = dates[0]
-            on_date = [
-                entry for entry in valid_entries if entry.get("session_date") == newest_date
-            ]
+            on_date = [entry for entry in valid_entries if entry.get("session_date") == newest_date]
             capital_keys = list(dict.fromkeys(str(entry["capital_key"]) for entry in on_date))
             if capital_keys:
                 self.comparison_pair(newest_date, capital_keys[0])
@@ -658,11 +655,16 @@ def create_server(
     report_dir: Path,
     host: str = "127.0.0.1",
     port: int = 8765,
+    *,
+    universe_db: Path | None = None,
 ) -> ThreadingHTTPServer:
     """Create a local dashboard HTTP server without starting its event loop."""
 
     store = ReportStore(report_dir)
     store.warm()
+    universe_store = UniverseDashboardStore(
+        universe_db or Path(__file__).resolve().parents[2] / "data" / "us_equity_paper.sqlite3"
+    )
 
     class DashboardHandler(BaseHTTPRequestHandler):
         server_version = "TraderJevDashboard/1.0"
@@ -678,6 +680,22 @@ def create_server(
                     self._send_json({"reports": store.index()})
                 elif request.path == "/api/costs":
                     self._send_json(store.cost_summary())
+                elif request.path == "/api/universe":
+                    self._send_json(universe_store.snapshot())
+                elif request.path == "/api/universe/listings":
+                    query = parse_qs(request.query)
+                    try:
+                        offset = max(0, min(int(query.get("offset", ["0"])[0]), 2**31 - 1))
+                        limit = max(1, min(int(query.get("limit", ["50"])[0]), 100))
+                    except ValueError:
+                        offset, limit = 0, 50
+                    self._send_json(
+                        universe_store.listings(
+                            query=query.get("q", [""])[0], offset=offset, limit=limit
+                        )
+                    )
+                elif request.path == "/api/universe/trades":
+                    self._send_json(universe_store.trade_history())
                 elif request.path == "/api/compare":
                     query = parse_qs(request.query)
                     session_date = query.get("date", [""])[0]
@@ -739,10 +757,16 @@ def create_server(
     return DashboardHTTPServer((host, port), DashboardHandler)
 
 
-def serve_dashboard(report_dir: Path, host: str, port: int) -> None:
+def serve_dashboard(
+    report_dir: Path,
+    host: str,
+    port: int,
+    *,
+    universe_db: Path | None = None,
+) -> None:
     """Serve the dashboard until the process receives an interrupt."""
 
-    server = create_server(report_dir, host, port)
+    server = create_server(report_dir, host, port, universe_db=universe_db)
     LOGGER.info("dashboard_listening", extra={"host": host, "port": port})
     try:
         server.serve_forever()
@@ -753,13 +777,19 @@ def serve_dashboard(report_dir: Path, host: str, port: int) -> None:
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="trader-jev-dashboard",
-        description="Serve a local read-only dashboard for Forward Paper reports.",
+        description="Serve a read-only dashboard for Paper reports and U.S. universe records.",
     )
     parser.add_argument(
         "--report-dir",
         type=Path,
         default=Path("/home/yappa/.local/state/trader-jev/paper"),
         help="Directory containing forward-paper-*.json reports.",
+    )
+    parser.add_argument(
+        "--universe-db",
+        type=Path,
+        default=Path(__file__).resolve().parents[2] / "data" / "us_equity_paper.sqlite3",
+        help="Read-only U.S. universe Paper SQLite database.",
     )
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=_port, default=8765)
@@ -770,7 +800,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
     try:
-        serve_dashboard(args.report_dir, args.host, args.port)
+        serve_dashboard(args.report_dir, args.host, args.port, universe_db=args.universe_db)
     except KeyboardInterrupt:
         return 0
     except OSError as exc:
@@ -864,12 +894,32 @@ DASHBOARD_HTML = """<!doctype html>
     .badges { display: flex; gap: 6px; margin-top: 7px; color: var(--muted); font-size: 10px; letter-spacing: .06em; }
     .badges span { border: 1px solid var(--line); border-radius: 5px; padding: 1px 6px; color: var(--text); }
     .toolbar { display: flex; gap: 9px; align-items: flex-end; flex-wrap: wrap; justify-content: flex-end; }
+    .overview-selectors { display: flex; gap: 9px; align-items: flex-end; flex-wrap: wrap; }
     .filter { display: flex; flex-direction: column; gap: 3px; }
     .filter label { font-size: 11px; color: var(--muted); }
-    select, button { background: var(--panel); border: 1px solid var(--line); color: var(--text); border-radius: 7px; padding: 7px 9px; font: inherit; }
+    input, select, button { background: var(--panel); border: 1px solid var(--line); color: var(--text); border-radius: 7px; padding: 7px 9px; font: inherit; }
     select { max-width: 220px; }
     button { cursor: pointer; }
     button:hover { border-color: var(--accent); }
+    .view-nav { display: flex; gap: 6px; overflow-x: auto; margin: -3px 0 18px; padding-bottom: 8px; border-bottom: 1px solid var(--line); }
+    .view-nav button { flex: 0 0 auto; padding: 7px 12px; color: var(--muted); border-color: transparent; background: transparent; }
+    .view-nav button[aria-current="page"] { background: var(--panel-raised); border-color: var(--line); color: var(--text); }
+    .page-view { min-width: 0; }
+    .page-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 14px; margin-bottom: 14px; }
+    .page-head p { margin: 5px 0 0; color: var(--muted); font-size: 12px; }
+    .page-toolbar { display: flex; flex-wrap: wrap; align-items: flex-end; gap: 8px; margin: 0 0 12px; }
+    .page-toolbar input { min-width: 210px; }
+    .page-toolbar .subtle { align-self: center; margin-left: auto; }
+    .page-kpis { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 9px; margin-bottom: 14px; }
+    .page-kpis .kpi-value { font-size: 18px; }
+    .status-badge { display: inline-flex; border: 1px solid var(--line); border-radius: 5px; padding: 2px 6px; color: var(--muted); font-size: 11px; }
+    .status-badge.good { border-color: #345a46; color: var(--good); }
+    .status-badge.warn { border-color: #69572f; color: var(--warn); }
+    .status-badge.bad { border-color: #684147; color: #ff9a9f; }
+    .reasons { max-width: 390px; white-space: normal; color: var(--warn); }
+    .page-controls { display: flex; align-items: center; justify-content: flex-end; gap: 8px; margin-top: 10px; }
+    .page-controls button:disabled { cursor: default; opacity: .45; }
+    .lane-list { white-space: normal; color: var(--muted); }
     .header-meta { display: flex; align-items: center; gap: 10px; color: var(--muted); font-size: 11px; margin-left: 3px; padding-bottom: 6px; white-space: nowrap; }
     .status { border: 1px solid var(--line); border-radius: 6px; padding: 3px 7px; color: var(--muted); font-size: 11px; font-weight: 600; }
     .status.failed { border-color: #684147; color: #ff9a9f; }
@@ -923,8 +973,8 @@ DASHBOARD_HTML = """<!doctype html>
     .chart .curve { fill: none; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
     .chart .last-point { stroke: var(--panel); stroke-width: 2; }
     .positive { color: var(--good); }
-    @media (max-width: 900px) { main { padding: 18px 16px 36px; } .kpis { grid-template-columns: repeat(3, minmax(0, 1fr)); } .layout { grid-template-columns: 1fr; } .wide { grid-column: auto; } }
-    @media (max-width: 600px) { header { display: block; } .toolbar { justify-content: flex-start; margin-top: 14px; } .header-meta { width: 100%; margin: 3px 0 0; } .kpis { grid-template-columns: repeat(2, minmax(0, 1fr)); } .kpi-value { font-size: 18px; } .cost-summary { grid-template-columns: 1fr; } .cost-item { padding: 7px 0; border-left: 0; border-bottom: 1px solid var(--line); } .cost-item:last-child { border-bottom: 0; } }
+    @media (max-width: 900px) { main { padding: 18px 16px 36px; } .kpis, .page-kpis { grid-template-columns: repeat(3, minmax(0, 1fr)); } .layout { grid-template-columns: 1fr; } .wide { grid-column: auto; } }
+    @media (max-width: 600px) { header { display: block; } .toolbar { justify-content: flex-start; margin-top: 14px; } .overview-selectors { width: 100%; } .header-meta { width: 100%; margin: 3px 0 0; } .kpis, .page-kpis { grid-template-columns: repeat(2, minmax(0, 1fr)); } .kpi-value { font-size: 18px; } .cost-summary { grid-template-columns: 1fr; } .cost-item { padding: 7px 0; border-left: 0; border-bottom: 1px solid var(--line); } .cost-item:last-child { border-bottom: 0; } .page-head { display: block; } .page-toolbar input { min-width: 0; width: 100%; } .page-toolbar .subtle { margin-left: 0; } }
   </style>
 </head>
 <body>
@@ -935,12 +985,21 @@ DASHBOARD_HTML = """<!doctype html>
       <div class="badges" aria-label="実行環境"><span>ペーパー運用</span><span>米国市場</span><span>読み取り専用</span></div>
     </div>
     <div class="toolbar">
-      <div class="filter"><label for="date-select">開始日</label><select id="date-select" aria-label="開始日"></select></div>
-      <div class="filter"><label for="capital-select">資金条件</label><select id="capital-select" aria-label="資金条件"></select></div>
+      <div id="overview-selectors" class="overview-selectors">
+        <div class="filter"><label for="date-select">開始日</label><select id="date-select" aria-label="開始日"></select></div>
+        <div class="filter"><label for="capital-select">資金条件</label><select id="capital-select" aria-label="資金条件"></select></div>
+      </div>
       <button id="refresh" type="button">更新</button>
       <div class="header-meta"><span id="last-updated">最終更新 —</span><span id="status" class="status empty" role="status">読込中</span></div>
     </div>
   </header>
+  <nav id="view-nav" class="view-nav" aria-label="ダッシュボードの画面">
+    <button type="button" data-view="overview" aria-current="page">概要</button>
+    <button type="button" data-view="universe">銘柄スクリーニング</button>
+    <button type="button" data-view="trades">取引記録</button>
+    <button type="button" data-view="analysis">Jev分析</button>
+  </nav>
+  <section id="overview-page" class="page-view">
   <div id="run-meta" class="run-meta">レポートを読み込んでいます...</div>
   <ul id="alerts" class="alert-list" hidden aria-label="警告とエラー"></ul>
   <div id="empty-state" class="empty-state" hidden role="status">条件に一致する有効なレポートがありません。</div>
@@ -993,6 +1052,64 @@ DASHBOARD_HTML = """<!doctype html>
       </details>
     </div>
   </div>
+  </section>
+  <section id="universe-page" class="page-view" hidden>
+    <div class="page-head">
+      <div><h2>銘柄スクリーニング</h2><p>取得した銘柄と条件を通過した銘柄を区別して表示します。</p></div>
+      <div id="universe-updated" class="subtle">読み込み待ち</div>
+    </div>
+    <div class="page-kpis" aria-label="銘柄スクリーニングの件数">
+      <div class="kpi"><div class="kpi-label">取得した銘柄</div><div id="screen-kpi-total" class="kpi-value">—</div></div>
+      <div class="kpi"><div class="kpi-label">条件通過</div><div id="screen-kpi-accepted" class="kpi-value">—</div></div>
+      <div class="kpi"><div class="kpi-label">条件除外</div><div id="screen-kpi-rejected" class="kpi-value">—</div></div>
+      <div class="kpi"><div class="kpi-label">順位付け済み候補</div><div id="screen-kpi-candidates" class="kpi-value">—</div></div>
+      <div class="kpi"><div class="kpi-label">銘柄マスター</div><div id="screen-kpi-master" class="kpi-value">—</div></div>
+    </div>
+    <div id="universe-notice" class="empty-state" hidden role="status"></div>
+    <section class="panel">
+      <div class="section-heading"><h2>スクリーニング結果</h2><span id="screen-caption" class="subtle"></span></div>
+      <div class="page-toolbar">
+        <div class="filter"><label for="screen-search">銘柄名・コード</label><input id="screen-search" type="search" placeholder="例: AAPL"></div>
+        <div class="filter"><label for="screen-filter">結果</label><select id="screen-filter"><option value="all">すべて</option><option value="accepted">条件通過</option><option value="rejected">条件除外</option></select></div>
+        <span id="screen-visible-count" class="subtle"></span>
+      </div>
+      <div id="screen-table" class="table-scroll"></div>
+      <div class="page-controls"><button id="screen-previous" type="button">前へ</button><span id="screen-page-label" class="subtle"></span><button id="screen-next" type="button">次へ</button></div>
+      <div id="screen-run-note" class="note">変化率と日中変動幅は小数比率を百分率に換算して表示します。</div>
+    </section>
+    <details id="master-section" class="panel">
+      <summary>銘柄マスターの検索</summary>
+      <p class="note">銘柄マスターは上場銘柄の登録情報です。スクリーナーを通過した企業とは異なります。</p>
+      <div class="page-toolbar">
+        <div class="filter"><label for="master-search">企業名・コード</label><input id="master-search" type="search" placeholder="企業名または銘柄コード"></div>
+        <span id="master-count" class="subtle"></span>
+      </div>
+      <div id="master-table" class="table-scroll"></div>
+      <div class="page-controls"><button id="master-previous" type="button">前へ</button><span id="master-page-label" class="subtle"></span><button id="master-next" type="button">次へ</button></div>
+    </details>
+  </section>
+  <section id="trades-page" class="page-view" hidden>
+    <div class="page-head"><div><h2>取引記録</h2><p>ユニバースPaperの仮想注文と仮想約定を表示します。</p></div><div id="trades-updated" class="subtle">読み込み待ち</div></div>
+    <div class="page-kpis" aria-label="取引記録の件数">
+      <div class="kpi"><div class="kpi-label">仮想注文</div><div id="trades-kpi-orders" class="kpi-value">—</div></div>
+      <div class="kpi"><div class="kpi-label">仮想約定</div><div id="trades-kpi-fills" class="kpi-value">—</div></div>
+      <div class="kpi"><div class="kpi-label">保有銘柄</div><div id="trades-kpi-positions" class="kpi-value">—</div></div>
+    </div>
+    <section class="panel">
+      <div class="section-heading"><h2>最近の注文・約定</h2><span id="trades-caption" class="subtle"></span></div>
+      <div id="universe-trades-table" class="table-scroll"></div>
+      <div class="note">この画面はユニバースPaperのSQLite記録を読み取ります。既存の概要画面にある固定条件Forward Paperの取引記録とは別の記録です。</div>
+    </section>
+  </section>
+  <section id="analysis-page" class="page-view" hidden>
+    <div class="page-head"><div><h2>Jev分析</h2><p>候補順位、Jevの評価、最終判断を銘柄ごとに並べて確認できます。</p></div><div id="analysis-updated" class="subtle">読み込み待ち</div></div>
+    <div id="analysis-notice" class="empty-state" hidden role="status"></div>
+    <section class="panel">
+      <div class="section-heading"><h2>候補ごとの評価</h2><span id="analysis-caption" class="subtle"></span></div>
+      <div id="analysis-table" class="table-scroll"></div>
+      <div class="note">候補順位はスクリーニング条件を通過した銘柄内の定量評価です。Jevの評価がない銘柄は「未実施」と表示します。</div>
+    </section>
+  </section>
 </main>
 <script>
 const $ = (id) => document.getElementById(id);
@@ -1238,6 +1355,240 @@ function renderCosts(data) {
   });
   $('jev-costs').replaceChildren(table(['期間', '対象日', '呼び出し回数', '入力トークン', '出力トークン', '合計トークン', '未計上', '料金'], rows));
 }
+const screenPageSize = 50;
+let currentView = 'overview';
+let universeData = null;
+let universeScreenPage = 0;
+let universeMasterPage = 0;
+let tradesData = null;
+const screeningReasonLabels = {
+  missing_universe_listing: '銘柄マスターに登録なし',
+  delisted: '上場廃止',
+  unsupported_exchange: '対象外の取引所',
+  etf_disabled: 'ETFは対象外',
+  min_price: '最低株価未満または不明',
+  min_market_cap: '最低時価総額未満または不明',
+  min_avg_turnover_20d: '20日平均売買代金が基準未満または不明',
+  min_listing_days: '上場日数が基準未満または不明',
+};
+const laneLabels = {momentum: 'モメンタム', breakout: '高値更新', reversal: '反転', liquid: '流動性'};
+const decisionLabels = {'BUY': '買い候補', 'SELL': '決済候補', 'HOLD': '見送り', 'NO TRADE': '注文なし'};
+function percentFromRatio(value) {
+  if (value === null || value === undefined || value === '') return '—';
+  const number = Number(value);
+  return Number.isFinite(number) ? `${number >= 0 ? '+' : ''}${(number * 100).toFixed(2)}%` : '—';
+}
+function probability(value) {
+  if (value === null || value === undefined || value === '') return '—';
+  const number = Number(value);
+  return Number.isFinite(number) ? `${(number * 100).toFixed(1)}%` : '—';
+}
+function ratio(value) {
+  if (value === null || value === undefined || value === '') return '—';
+  const number = Number(value);
+  return Number.isFinite(number) ? `${number.toFixed(2)}倍` : '—';
+}
+function reasonLabels(reasons) {
+  return (reasons || []).map((reason) => screeningReasonLabels[reason] || '条件を満たさない').join('・') || '—';
+}
+function decisionReasonLabel(reason) {
+  return ({
+    outside_regular_us_equity_session: '米国株の通常取引時間外',
+    'JeV thresholds passed': 'Jevの基準を満たしました',
+    'JeV thresholds not met': 'Jevの基準を満たしませんでした',
+  })[reason] || '詳細記録あり';
+}
+function setupLabel(value) {
+  const key = String(value || '').toUpperCase();
+  return ({
+    NO_SETUP: 'セットアップなし', MOMENTUM: 'モメンタム', BREAKOUT: '高値更新',
+    REVERSAL: '反転', PULLBACK: '押し目', TREND_CONTINUATION: 'トレンド継続',
+  })[key] || (value ? String(value).replaceAll('_', ' ') : '—');
+}
+function updateScreenTable() {
+  const rows = universeData?.screening_rows || [];
+  const query = $('screen-search').value.trim().toLocaleLowerCase('ja-JP');
+  const filter = $('screen-filter').value;
+  const selected = rows.filter((row) => {
+    const searchable = `${row.symbol || ''} ${row.name || ''}`.toLocaleLowerCase('ja-JP');
+    if (query && !searchable.includes(query)) return false;
+    if (filter === 'accepted' && row.accepted !== true) return false;
+    if (filter === 'rejected' && row.accepted !== false) return false;
+    return true;
+  });
+  const pageCount = Math.max(1, Math.ceil(selected.length / screenPageSize));
+  universeScreenPage = Math.min(universeScreenPage, pageCount - 1);
+  const pageRows = selected.slice(universeScreenPage * screenPageSize, (universeScreenPage + 1) * screenPageSize);
+  const renderedRows = pageRows.map((row) => [
+    row.symbol || '—', row.name || '—',
+    row.accepted === true ? ['通過', 'positive'] : row.accepted === false ? ['除外', 'negative'] : '不明',
+    money(row.price), money(row.market_cap_usd), money(row.turnover_20d_usd), ratio(row.volume_ratio),
+    percentFromRatio(row.price_change_1d), percentFromRatio(row.price_change_5d),
+    percentFromRatio(row.amplitude_1d), integer(row.listed_days),
+    [reasonLabels(row.rejection_reasons), row.accepted === false ? 'reasons' : ''],
+  ]);
+  const totalAvailable = universeData?.screen?.stored_count || 0;
+  const unavailable = !universeData?.screen;
+  const emptyMessage = unavailable ? 'スクリーニング結果がまだ記録されていません' : 'この条件に一致する企業はありません';
+  $('screen-table').replaceChildren(table(
+    ['銘柄コード', '企業名', '判定', '株価（米ドル）', '時価総額（米ドル）', '20日平均売買代金（米ドル）', '出来高倍率', '1日変化率', '5日変化率', '日中変動幅', '上場日数', '除外理由'],
+    renderedRows, emptyMessage,
+  ));
+  $('screen-visible-count').textContent = `表示対象 ${integer(selected.length)}件`;
+  $('screen-caption').textContent = `${integer(totalAvailable)}件を記録`;
+  $('screen-page-label').textContent = `${integer(universeScreenPage + 1)} / ${integer(pageCount)}ページ`;
+  $('screen-previous').disabled = universeScreenPage === 0;
+  $('screen-next').disabled = universeScreenPage >= pageCount - 1;
+}
+function renderUniverse(data) {
+  const previousRunId = universeData?.screen?.run_id;
+  universeData = data;
+  const screen = data.screen;
+  const master = data.universe;
+  $('screen-kpi-total').textContent = integer(screen?.total_count ?? 0);
+  $('screen-kpi-accepted').textContent = integer(screen?.accepted_count ?? 0);
+  $('screen-kpi-rejected').textContent = integer(screen?.rejected_count ?? 0);
+  $('screen-kpi-candidates').textContent = integer(screen?.candidate_count ?? 0);
+  $('screen-kpi-master').textContent = integer(master?.count ?? 0);
+  $('universe-updated').textContent = master?.updated_at ? `銘柄マスター更新 ${formatDateTime(master.updated_at)}` : '銘柄マスターなし';
+  const notice = $('universe-notice');
+  if (!data.available) {
+    notice.textContent = '銘柄データベースを読み込めません。データベースの場所と実行環境を確認してください。';
+    notice.hidden = false;
+  } else if (!screen) {
+    const activity = data.latest_activity;
+    const outsideSession = activity?.reason_code === 'outside_regular_us_equity_session';
+    const prefix = outsideSession ? `直近の試行（${formatDateTime(activity.recorded_at)}）は通常取引時間外のため、スクリーニングを実施していません。` : 'スクリーニングの実行結果はまだ保存されていません。';
+    const masterText = master ? `銘柄マスターには ${integer(master.count)}件ありますが、これはスクリーニング済み企業の一覧ではありません。` : '銘柄マスターもまだ保存されていません。';
+    notice.textContent = `${prefix} ${masterText}`;
+    notice.hidden = false;
+  } else {
+    notice.textContent = screen.truncated
+      ? `スクリーニング結果は${integer(screen.total_count)}件、${integer(screen.stored_count)}件を保存しています。取得上限に達したため一部が省略されています。`
+      : `${formatDateTime(screen.recorded_at)}のスクリーニング結果です。`;
+    notice.hidden = false;
+  }
+  const runNote = screen
+    ? `保存件数 ${integer(screen.stored_count)}件 · 条件通過 ${integer(screen.screened_count)}件 · 条件除外 ${integer(screen.hard_filter_rejected_count)}件${screen.invalid_record_count ? ` · 読み取れない記録 ${integer(screen.invalid_record_count)}件` : ''}`
+    : '';
+  $('screen-run-note').textContent = runNote;
+  if (previousRunId !== screen?.run_id) universeScreenPage = 0;
+  updateScreenTable();
+  loadMasterListings();
+}
+function renderMasterListings(data) {
+  const rows = (data.rows || []).map((row) => [row.symbol || '—', row.name || '—', row.exchange || '—', row.security_type || '—', row.listing_date || '—']);
+  $('master-table').replaceChildren(table(['銘柄コード', '企業名', '取引所', '種類', '上場日'], rows, '該当する銘柄はありません'));
+  const pageCount = Math.max(1, Math.ceil((data.total || 0) / 50));
+  $('master-count').textContent = `該当 ${integer(data.total || 0)}件 · 銘柄マスター ${integer(universeData?.universe?.count || 0)}件`;
+  $('master-page-label').textContent = `${integer(masterPage + 1)} / ${integer(pageCount)}ページ`;
+  $('master-previous').disabled = masterPage === 0;
+  $('master-next').disabled = masterPage >= pageCount - 1;
+}
+async function loadMasterListings() {
+  if (currentView !== 'universe' || !universeData?.available) return;
+  const params = new URLSearchParams({q: $('master-search').value, offset: String(masterPage * 50), limit: '50'});
+  try {
+    const response = await fetch(`/api/universe/listings?${params}`, {cache: 'no-store'});
+    if (!response.ok) throw new Error(response.statusText);
+    renderMasterListings(await response.json());
+  } catch (_) {
+    $('master-table').replaceChildren(table([], [], '銘柄マスターを読み込めませんでした'));
+  }
+}
+async function loadUniverse() {
+  if (!universeData) {
+    $('universe-notice').textContent = 'スクリーニング記録を読み込んでいます...';
+    $('universe-notice').hidden = false;
+  }
+  try {
+    const response = await fetch('/api/universe', {cache: 'no-store'});
+    if (!response.ok) throw new Error(response.statusText);
+    renderUniverse(await response.json());
+  } catch (_) {
+    renderUniverse({available: false, universe: null, screen: null, screening_rows: [], analysis_rows: []});
+  }
+}
+function renderUniverseTrades(data) {
+  tradesData = data;
+  $('trades-kpi-orders').textContent = integer(data.order_count || 0);
+  $('trades-kpi-fills').textContent = integer(data.fill_count || 0);
+  $('trades-kpi-positions').textContent = integer(data.position_count || 0);
+  $('trades-updated').textContent = data.latest_portfolio_at ? `資産記録 ${formatDateTime(data.latest_portfolio_at)}` : '資産記録なし';
+  const rows = (data.events || []).map((event) => [
+    formatDateTime(event.recorded_at), event.symbol || '—', event.event_type,
+    sideLabel(event.side), integer(event.quantity), money(event.price), money(event.fees),
+    currencyLabel(event.currency), event.dry_run ? '試算のみ' : 'ペーパー記録',
+  ]);
+  const message = !data.available ? '銘柄データベースを読み込めません' : 'ユニバースPaperの注文・約定記録はまだありません';
+  $('universe-trades-table').replaceChildren(table(['日時', '銘柄', '記録種別', '売買', '数量', '価格（米ドル）', '手数料', '通貨', '状態'], rows, message));
+  $('trades-caption').textContent = `${integer(rows.length)}件表示 · 注文総数 ${integer(data.order_count || 0)}件 · 約定総数 ${integer(data.fill_count || 0)}件`;
+}
+async function loadTrades() {
+  if (!tradesData) $('universe-trades-table').textContent = '注文・約定記録を読み込んでいます...';
+  try {
+    const response = await fetch('/api/universe/trades', {cache: 'no-store'});
+    if (!response.ok) throw new Error(response.statusText);
+    renderUniverseTrades(await response.json());
+  } catch (_) {
+    renderUniverseTrades({available: false, order_count: 0, fill_count: 0, position_count: 0, events: []});
+  }
+}
+function renderAnalysis(data) {
+  const rows = (data.analysis_rows || []).map((row) => {
+    const lanes = Object.entries(row.lane_scores || {}).map(([lane, score]) => `${laneLabels[lane] || lane} ${probability(score)}`).join(' · ') || (row.screening_lanes || []).map((lane) => laneLabels[lane] || lane).join('・') || '—';
+    const action = decisionLabels[row.decision] || (row.decision ? '判定記録あり' : '未判定');
+    const jevState = row.setup_type ? setupLabel(row.setup_type) : row.jev_requested ? '応答なし' : '未実施';
+    const reason = row.reason_code ? decisionReasonLabel(row.reason_code) : '—';
+    return [
+      integer(row.quant_rank), row.symbol || '—', row.name || '—', probability(row.quant_score), [lanes, 'lane-list'],
+      jevState, probability(row.trend_quality), probability(row.continuation_quality),
+      probability(row.trade_worthy_probability), probability(row.abnormal_probability),
+      probability(row.jev_score), action, reason,
+    ];
+  });
+  $('analysis-table').replaceChildren(table(
+    ['順位', '銘柄コード', '企業名', '定量評価', '候補区分', 'Jevの型', 'トレンド品質', '継続性', '売買適性', '異常確率', 'Jev評価', '判断', '理由'],
+    rows,
+    '分析対象の候補はありません',
+  ));
+  const screen = data.screen;
+  $('analysis-updated').textContent = screen ? `対象実行 ${formatDateTime(screen.recorded_at)}` : 'スクリーニング実行なし';
+  $('analysis-caption').textContent = screen ? `候補 ${integer((data.analysis_rows || []).length)}件 · Jev実行 ${integer(rows.filter((row) => row[5] !== '未実施').length)}件` : '最新スクリーニング結果を待っています';
+  const notice = $('analysis-notice');
+  if (!data.available) {
+    notice.textContent = '銘柄データベースを読み込めません。';
+    notice.hidden = false;
+  } else if (!screen) {
+    notice.textContent = 'スクリーニング結果がないため、候補順位とJev分析はまだ表示できません。';
+    notice.hidden = false;
+  } else {
+    notice.hidden = true;
+  }
+}
+function activateView(view) {
+  currentView = view;
+  document.querySelectorAll('#view-nav [data-view]').forEach((button) => {
+    const selected = button.dataset.view === view;
+    if (selected) button.setAttribute('aria-current', 'page');
+    else button.removeAttribute('aria-current');
+  });
+  $('overview-page').hidden = view !== 'overview';
+  $('universe-page').hidden = view !== 'universe';
+  $('trades-page').hidden = view !== 'trades';
+  $('analysis-page').hidden = view !== 'analysis';
+  $('overview-selectors').hidden = view !== 'overview';
+  document.querySelector('.header-meta').hidden = view !== 'overview';
+  if (view === 'universe') loadUniverse();
+  if (view === 'trades') loadTrades();
+  if (view === 'analysis') loadUniverse().then(() => renderAnalysis(universeData || {available: false}));
+}
+function loadActiveView() {
+  if (currentView === 'overview') return load();
+  if (currentView === 'universe') return loadUniverse();
+  if (currentView === 'trades') return loadTrades();
+  return loadUniverse().then(() => renderAnalysis(universeData || {available: false}));
+}
 function statusText(rule, jev) {
   const branches = [['RULE', rule], ['JEV', jev]].filter(([, report]) => report);
   return branches.map(([mode, report]) => `${modeLabel(mode)}：${statusLabel(report.status)}`).join(' · ');
@@ -1316,9 +1667,22 @@ async function load() {
   }
 }
 ['date-select', 'capital-select'].forEach((id) => $(id).addEventListener('change', () => load()));
-$('refresh').addEventListener('click', () => load());
+document.querySelectorAll('#view-nav [data-view]').forEach((button) => button.addEventListener('click', () => activateView(button.dataset.view || 'overview')));
+$('refresh').addEventListener('click', () => loadActiveView());
+$('screen-search').addEventListener('input', () => { universeScreenPage = 0; updateScreenTable(); });
+$('screen-filter').addEventListener('change', () => { universeScreenPage = 0; updateScreenTable(); });
+$('screen-previous').addEventListener('click', () => { universeScreenPage = Math.max(0, universeScreenPage - 1); updateScreenTable(); });
+$('screen-next').addEventListener('click', () => { universeScreenPage += 1; updateScreenTable(); });
+$('master-previous').addEventListener('click', () => { masterPage = Math.max(0, masterPage - 1); loadMasterListings(); });
+$('master-next').addEventListener('click', () => { masterPage += 1; loadMasterListings(); });
+let masterSearchTimer = null;
+$('master-search').addEventListener('input', () => {
+  masterPage = 0;
+  if (masterSearchTimer !== null) clearTimeout(masterSearchTimer);
+  masterSearchTimer = setTimeout(() => loadMasterListings(), 250);
+});
 $('trade-toggle').addEventListener('click', () => { showAllTrades = !showAllTrades; renderTrades(currentTradeRows.map(({mode, trade}) => ({mode, report: {trade_records: [trade]}}))); });
-load(); setInterval(() => load(), 15000);
+load(); setInterval(() => loadActiveView(), 15000);
 </script>
 </body>
 </html>

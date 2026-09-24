@@ -74,11 +74,25 @@ also remains available on expansion.
 The page refreshes the report index every 15 seconds; a running Forward Paper
 session becomes visible after it writes its session report.
 
+ダッシュボードには、米国株ユニバースPaper用の「銘柄スクリーニング」
+「取引記録」「Jev分析」画面もあります。既定では、リポジトリ内の
+`data/us_equity_paper.sqlite3` を使います。別のSQLiteファイルを読む場合は
+`--universe-db` で指定します。データベースは読み取り専用で開きます。
+スクリーニング画面には最新の保存済み結果と除外理由を表示します。
+銘柄マスターの検索結果は、スクリーニング通過銘柄と区別して表示します。
+Jev分析画面には候補順位、要約したJev評価、判断を表示します。
+取引記録画面には仮想注文と仮想約定を表示します。Jevへの生の要求・応答は
+ブラウザーへ返しません。
+
 The JSON read endpoints are `/api/reports`, `/api/latest`, and
 `/api/report?name=<report-file-name>`. `/api/compare?date=<date>&capital_key=<key>`
 returns the newest valid `RULE` and `JEV` report for one matching condition, or
 `null` for a missing branch. `/api/costs` returns Jev usage and cost aggregates
 for the latest usage day, Monday-to-Sunday week, and calendar month.
+`/api/universe` returns the latest saved screen and candidate analysis,
+`/api/universe/listings?q=<text>&offset=<n>&limit=<n>` searches the cached
+listing master, and `/api/universe/trades` returns recent simulated orders and
+fills.
 The server binds to `127.0.0.1` by default so the report is not exposed to the
 network.
 Report error messages stay in the local report; the dashboard API shows their

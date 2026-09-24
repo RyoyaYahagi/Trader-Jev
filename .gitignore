@@ -10,3 +10,4 @@ htmlcov/
 .env
 .env.*
 !.env.example
+data/us_equity_paper.sqlite3*

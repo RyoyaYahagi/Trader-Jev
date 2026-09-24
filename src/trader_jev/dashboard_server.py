@@ -221,15 +221,14 @@ class ReportStore:
             config_mapping = cast(Mapping[str, Any], run_config)
             if str(config_mapping.get("decision_mode", "")).upper() != "JEV":
                 continue
-            raw_pricing = config_mapping.get("jev_pricing")
-            if not isinstance(raw_pricing, Mapping):
+            pricing_values = _safe_jev_pricing(config_mapping.get("jev_pricing"))
+            if pricing_values is None:
                 continue
-            pricing_mapping = cast(Mapping[str, Any], raw_pricing)
             pricing = {
-                "input_usd_per_1k_tokens": pricing_mapping.get("input_usd_per_1k_tokens"),
-                "output_usd_per_1k_tokens": pricing_mapping.get("output_usd_per_1k_tokens"),
-                "request_usd": pricing_mapping.get("request_usd"),
-                "currency": str(pricing_mapping.get("currency", "USD")).upper(),
+                "input_usd_per_1k_tokens": pricing_values.get("input_usd_per_1k_tokens"),
+                "output_usd_per_1k_tokens": pricing_values.get("output_usd_per_1k_tokens"),
+                "request_usd": pricing_values.get("request_usd"),
+                "currency": pricing_values.get("currency", "USD"),
             }
             input_price = pricing["input_usd_per_1k_tokens"]
             output_price = pricing["output_usd_per_1k_tokens"]
@@ -338,7 +337,9 @@ def dashboard_payload(name: str, summary: ForwardPaperSummary) -> dict[str, Any]
         alerts.append("未決済ポジションが残っています")
     if portfolio.open_orders:
         alerts.append("未決済注文が残っています")
-    alerts.extend(summary.errors)
+    if summary.errors:
+        alerts.append(f"レポート内エラー {len(summary.errors)}件")
+    public_errors = ["詳細はForward Paper実行ログを確認してください"] * len(summary.errors)
     payload = {
         "report_name": name,
         "status": summary.status,
@@ -352,7 +353,7 @@ def dashboard_payload(name: str, summary: ForwardPaperSummary) -> dict[str, Any]
         "pipeline_failures": summary.pipeline_failures,
         "holds": summary.holds,
         "fills": summary.fills,
-        "errors": list(summary.errors),
+        "errors": public_errors,
         "alerts": alerts,
         "portfolio": portfolio.model_dump(mode="json"),
         "pnl": {
@@ -514,11 +515,14 @@ def _capital_condition_label(
         return condition
     if constraint is None:
         if scenario_id.startswith("unconstrained"):
-            return "制約なし"
+            return f"制約なし · 初期 USD {_format_capital_amount(initial_capital)}"
         if scenario_id == "single":
             return f"単一条件 · USD {_format_capital_amount(initial_capital)}"
         return f"資金上限なし · USD {_format_capital_amount(initial_capital)}"
-    return f"USD {_format_capital_amount(Decimal(constraint))}制約"
+    condition = f"USD {_format_capital_amount(Decimal(constraint))}制約"
+    if Decimal(constraint) != initial_capital:
+        condition += f" · 初期 USD {_format_capital_amount(initial_capital)}"
+    return condition
 
 
 def _format_capital_amount(value: Decimal) -> str:
@@ -596,9 +600,21 @@ def create_server(
             except DashboardReportError as exc:
                 self._send_json({"error": str(exc)}, status=400)
             except Exception as exc:
+                traceback = exc.__traceback__
+                while traceback is not None and traceback.tb_next is not None:
+                    traceback = traceback.tb_next
                 LOGGER.error(
                     "dashboard_request_failed",
-                    extra={"error_type": type(exc).__name__},
+                    extra={
+                        "error_type": type(exc).__name__,
+                        "cause_type": type(exc.__cause__).__name__ if exc.__cause__ else None,
+                        "error_location": (
+                            f"{Path(traceback.tb_frame.f_code.co_filename).name}:"
+                            f"{traceback.tb_lineno}"
+                            if traceback is not None
+                            else None
+                        ),
+                    },
                 )
                 self._send_json({"error": "internal dashboard error"}, status=500)
 

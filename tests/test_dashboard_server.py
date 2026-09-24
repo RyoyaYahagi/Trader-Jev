@@ -385,6 +385,32 @@ def test_comparison_pair_returns_latest_rule_and_jev_for_same_condition(
     assert pair["jev"]["report_name"] == "forward-paper-jev.json"
 
 
+@pytest.mark.parametrize(
+    "run_config",
+    (
+        {"decision_mode": "RULE", "capital_constraint": "500"},
+        {"decision_mode": "RULE", "scenario_id": "unconstrained"},
+    ),
+)
+def test_capital_selector_labels_distinguish_initial_capital(
+    tmp_path: Path, run_config: dict[str, str]
+) -> None:
+    for capital in (Decimal("10000"), Decimal("20000")):
+        base = make_summary()
+        summary = base.model_copy(
+            update={
+                "portfolio": base.portfolio.model_copy(update={"initial_capital": capital}),
+                "run_config": run_config,
+            }
+        )
+        write_named_report(tmp_path, f"forward-paper-{capital}.json", summary)
+
+    entries = ReportStore(tmp_path).index()
+
+    assert len({entry["capital_key"] for entry in entries}) == 2
+    assert len({entry["capital_label"] for entry in entries}) == 2
+
+
 def test_dashboard_payload_redacts_credentials_without_hiding_usage_counts() -> None:
     record = JevUsageRecord(
         occurred_at=NOW,
@@ -396,6 +422,7 @@ def test_dashboard_payload_redacts_credentials_without_hiding_usage_counts() -> 
     )
     summary = make_summary().model_copy(
         update={
+            "errors": ("Authorization: Bearer error-secret",),
             "jev_usage": summarize_usage((record,)),
             "run_config": {
                 "execution_mode": "PAPER",
@@ -421,6 +448,9 @@ def test_dashboard_payload_redacts_credentials_without_hiding_usage_counts() -> 
         "currency": "USD",
     }
     assert payload["jev_usage"]["input_tokens"] == 12
+    assert payload["errors"] == ["詳細はForward Paper実行ログを確認してください"]
+    assert "レポート内エラー 1件" in payload["alerts"]
+    assert "error-secret" not in json.dumps(payload)
     assert "do-not-show" not in json.dumps(payload)
     assert "also-do-not-show" not in json.dumps(payload)
     assert "never-show" not in json.dumps(payload)
@@ -468,6 +498,30 @@ def test_report_store_aggregates_jev_cost_by_period(tmp_path: Path) -> None:
     assert costs["daily"]["estimated_cost"] == "0.25"
     assert costs["weekly"]["request_count"] == 1
     assert costs["monthly"]["request_count"] == 1
+
+
+def test_cost_summary_excludes_non_numeric_pricing_fields(tmp_path: Path) -> None:
+    base = make_summary()
+    summary = base.model_copy(
+        update={
+            "run_config": {
+                "decision_mode": "JEV",
+                "jev_pricing": {
+                    "input_usd_per_1k_tokens": "pricing-secret",
+                    "output_usd_per_1k_tokens": "0.01",
+                    "currency": "secret-currency",
+                },
+            }
+        }
+    )
+    write_named_report(tmp_path, "forward-paper-jev.json", summary)
+
+    pricing = ReportStore(tmp_path).cost_summary(reference_time=NOW)["pricing"]
+
+    assert pricing["input_usd_per_1k_tokens"] is None
+    assert pricing["output_usd_per_1k_tokens"] == "0.01"
+    assert pricing["currency"] == "USD"
+    assert "secret" not in json.dumps(pricing)
 
 
 def test_dashboard_http_endpoints_are_read_only(tmp_path: Path) -> None:

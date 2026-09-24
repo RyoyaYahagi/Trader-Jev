@@ -81,6 +81,8 @@ returns the newest valid `RULE` and `JEV` report for one matching condition, or
 for the latest usage day, Monday-to-Sunday week, and calendar month.
 The server binds to `127.0.0.1` by default so the report is not exposed to the
 network.
+Report error messages stay in the local report; the dashboard API shows their
+count without returning raw exception text.
 
 ## NASDAQ session schedule
 

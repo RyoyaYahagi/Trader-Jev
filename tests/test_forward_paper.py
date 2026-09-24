@@ -9,6 +9,7 @@ import pytest
 from trader_jev.clock import FixedClock
 from trader_jev.forward_paper import (
     CapitalScenario,
+    DEFAULT_CAPITAL_SCENARIOS,
     ForwardDecisionMode,
     ForwardPaperConfig,
     ForwardPaperRunner,
@@ -218,6 +219,13 @@ def test_capital_scenario_parser_supports_requested_labels() -> None:
     assert scenarios[-1].capital_constraint is None
     assert scenarios[-1].initial_capital == Decimal("3174.80")
     assert scenarios[-1].jpy_capital == Decimal("500000")
+
+
+def test_default_capital_scenarios_exclude_250k() -> None:
+    expected = ["jpy-100k", "jpy-500k", "unconstrained"]
+
+    assert [scenario.scenario_id for scenario in DEFAULT_CAPITAL_SCENARIOS] == expected
+    assert [scenario.scenario_id for scenario in build_capital_scenarios()] == expected
 
 
 @pytest.mark.asyncio

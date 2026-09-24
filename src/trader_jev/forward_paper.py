@@ -146,16 +146,6 @@ DEFAULT_CAPITAL_SCENARIOS: tuple[CapitalScenario, ...] = (
         fx_source=DEFAULT_USD_JPY_SOURCE,
     ),
     CapitalScenario(
-        scenario_id="jpy-250k",
-        label="25万制約",
-        initial_capital=_jpy_to_usd(Decimal("250000"), DEFAULT_USD_JPY_RATE),
-        capital_constraint=_jpy_to_usd(Decimal("250000"), DEFAULT_USD_JPY_RATE),
-        jpy_capital=Decimal("250000"),
-        usd_jpy_rate=DEFAULT_USD_JPY_RATE,
-        fx_as_of=DEFAULT_USD_JPY_AS_OF,
-        fx_source=DEFAULT_USD_JPY_SOURCE,
-    ),
-    CapitalScenario(
         scenario_id="jpy-500k",
         label="50万制約",
         initial_capital=_jpy_to_usd(Decimal("500000"), DEFAULT_USD_JPY_RATE),
@@ -856,7 +846,7 @@ def build_capital_scenarios(
     if not fx_as_of.strip() or not fx_source.strip():
         raise ValueError("fx_as_of and fx_source must not be blank")
     if values is None:
-        values = ("100000", "250000", "500000", "unconstrained")
+        values = ("100000", "500000", "unconstrained")
     unconstrained_cash = (
         _jpy_to_usd(DEFAULT_UNCONSTRAINED_JPY_REFERENCE, usd_jpy_rate)
         if unconstrained_initial_capital is None
@@ -1019,7 +1009,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--capital-scenarios",
         help=(
             "Comma-separated JPY capital scenarios to run in parallel, such as "
-            "10万,25万,50万,unconstrained."
+            "10万,50万,unconstrained."
         ),
     )
     parser.add_argument(

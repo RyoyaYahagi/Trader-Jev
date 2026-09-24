@@ -74,6 +74,38 @@ def test_minute_bar_subscription_obeys_remaining_quota_and_reuses_active_symbols
     assert any(error.kind == USMoomooFailureKind.SUBSCRIPTION_QUOTA for error in adapter.errors)
 
 
+def test_scheduled_bar_fetch_skips_fresh_bars_and_reconciles_subscriptions(
+    monkeypatch: Any,
+) -> None:
+    context = _FakeQuoteContext()
+    sdk = SimpleNamespace(
+        SubType=SimpleNamespace(K_1M="K_1M"),
+        KLType=SimpleNamespace(K_1M="K_1M"),
+        AuType=SimpleNamespace(QFQ="QFQ"),
+    )
+    monkeypatch.setattr(MoomooUSMarketAdapter, "_sdk", staticmethod(lambda: sdk))
+    adapter = MoomooUSMarketAdapter(
+        connection=MoomooClientConfig(),
+        config=USMoomooConfig(retry_attempts=0),
+        context_factory=lambda _config: context,
+        sleep=lambda _seconds: None,
+    )
+
+    with adapter:
+        first = adapter.fetch_minute_bars_with_refresh(("US.AAPL",), refresh_codes=(), count=2)
+        second = adapter.fetch_minute_bars_with_refresh(
+            ("US.AAPL",), refresh_codes=("US.AAPL",), count=2
+        )
+        empty = adapter.fetch_minute_bars_with_refresh((), refresh_codes=(), count=2)
+
+    assert not first
+    assert tuple(second) == ("US.AAPL",)
+    assert not empty
+    assert context.kline_calls == ["US.AAPL"]
+    assert context.subscriptions == [(["US.AAPL"], ["K_1M"])]
+    assert context.unsubscriptions == [(["US.AAPL"], ["K_1M"])]
+
+
 def _result(property_id: int, value: object, *, days: int | None = None) -> dict[str, Any]:
     result: dict[str, Any] = {
         "property": {"name": property_id},
@@ -88,6 +120,7 @@ class _FakeQuoteContext:
     def __init__(self) -> None:
         self.subscriptions: list[tuple[list[str], list[object]]] = []
         self.unsubscriptions: list[tuple[list[str], list[object]]] = []
+        self.kline_calls: list[str] = []
         self.closed = False
 
     def get_stock_basicinfo(self, market: object, stock_type: object) -> tuple[int, list[object]]:
@@ -129,7 +162,7 @@ class _FakeQuoteContext:
         ktype: object,
         autype: object,
     ) -> tuple[int, list[dict[str, object]]]:
-        assert code == "US.AAPL"
+        self.kline_calls.append(code)
         assert num == 2
         assert ktype == "K_1M"
         assert autype == "QFQ"

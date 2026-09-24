@@ -7,8 +7,8 @@ import asyncio
 import json
 import logging
 import os
-from collections.abc import Callable, Mapping, Sequence
-from contextlib import AbstractContextManager
+from collections.abc import Callable, Generator, Mapping, Sequence
+from contextlib import AbstractContextManager, contextmanager
 from datetime import UTC, date, datetime, time
 from decimal import ROUND_DOWN, Decimal, InvalidOperation
 from enum import StrEnum
@@ -86,11 +86,13 @@ class USPaperConfig(DomainModel):
     min_avg_turnover_20d_usd: Decimal = Field(default=Decimal("10000000"), ge=Decimal("0"))
     min_listing_days: int = Field(default=90, ge=0)
     max_screen_rows: int = Field(default=2000, gt=0)
+    screen_refresh_interval_seconds: int = Field(default=300, gt=0)
     lane_top_k: int = Field(default=50, gt=0)
     union_limit: int = Field(default=200, gt=0)
     minute_bar_candidates: int = Field(default=30, ge=0)
     jev_candidates: int = Field(default=30, ge=0)
     minute_bar_count: int = Field(default=390, ge=2, le=1000)
+    minute_bar_refresh_interval_seconds: int = Field(default=60, gt=0)
     cached_bars_max_age_seconds: int = Field(default=120, ge=0)
     max_quote_age_seconds: int = Field(default=15, gt=0)
     decision_interval_seconds: int = Field(default=30, gt=0)
@@ -187,6 +189,8 @@ class USScanResult(DomainModel):
     screen_total_count: int = 0
     screen_pages: int = 0
     screen_truncated: bool = False
+    screen_cache_hit: bool = False
+    screen_refreshed_at: datetime | None = None
     rejected: Mapping[str, tuple[str, ...]] = Field(default_factory=dict)
     candidates: tuple[USRankedCandidate, ...] = ()
     snapshots: Mapping[str, USMarketSnapshot] = Field(default_factory=dict)
@@ -276,10 +280,22 @@ class USUniversePaperRunner:
         self._clock = clock or LiveClock()
         self._logger = logger or logging.getLogger("trader_jev.us_paper")
         self._calendar = NasdaqCalendar()
+        self._active_market: USMarketSource | None = None
+        self._cached_screen: ScreenFetch | None = None
+        self._screen_cached_at: datetime | None = None
+        self._screen_attempted_at: datetime | None = None
+
+    @contextmanager
+    def _market_session(self) -> Generator[USMarketSource, None, None]:
+        if self._active_market is not None:
+            yield self._active_market
+            return
+        with self._market_source_factory() as market:
+            yield market
 
     def update_universe(self, *, include_etf: bool | None = None) -> tuple[USUniverseListing, ...]:
         now = self._clock.now()
-        with self._market_source_factory() as market:
+        with self._market_session() as market:
             listings = market.fetch_universe(
                 include_etf=self.config.include_etf if include_etf is None else include_etf
             )
@@ -291,6 +307,9 @@ class USUniversePaperRunner:
             payload={"status": "UNIVERSE_UPDATED", "count": len(listings)},
             recorded_at=now,
         )
+        self._cached_screen = None
+        self._screen_cached_at = None
+        self._screen_attempted_at = None
         return listings
 
     def scan(self) -> USScanResult:
@@ -327,6 +346,7 @@ class USUniversePaperRunner:
         )
         errors: list[str] = []
         screen = ScreenFetch((), 0, False, 0)
+        screen_cache_hit = False
         snapshots: Mapping[str, USMarketSnapshot] = {}
         bars: Mapping[str, tuple[USOHLCVBar, ...]] = {}
         rejected: Mapping[str, tuple[str, ...]] = {}
@@ -336,14 +356,34 @@ class USUniversePaperRunner:
         accepted_rows: tuple[USScreenRow, ...] = ()
         union_rows: tuple[USScreenRow, ...] = ()
         try:
-            with self._market_source_factory() as market:
-                screen = market.screen_us(
-                    min_price_usd=self.config.min_price_usd,
-                    min_market_cap_usd=self.config.min_market_cap_usd,
-                    min_avg_turnover_20d_usd=self.config.min_avg_turnover_20d_usd,
-                    min_listing_days=self.config.min_listing_days,
-                    max_rows=self.config.max_screen_rows,
-                )
+            with self._market_session() as market:
+                market.errors.clear()
+                if self._screen_cache_is_fresh(now):
+                    cached_screen = self._cached_screen
+                    if cached_screen is None:
+                        raise RuntimeError("fresh screener cache is missing")
+                    screen = cached_screen
+                    screen_cache_hit = True
+                elif not self._screen_refresh_is_due(now):
+                    if self._cached_screen is None:
+                        raise USMoomooError(
+                            "EMPTY_DATA",
+                            "screener refresh is cooling down and no successful cache is available",
+                            method="get_stock_screen",
+                        )
+                    screen = self._cached_screen
+                    screen_cache_hit = True
+                else:
+                    self._screen_attempted_at = now
+                    screen = market.screen_us(
+                        min_price_usd=self.config.min_price_usd,
+                        min_market_cap_usd=self.config.min_market_cap_usd,
+                        min_avg_turnover_20d_usd=self.config.min_avg_turnover_20d_usd,
+                        min_listing_days=self.config.min_listing_days,
+                        max_rows=self.config.max_screen_rows,
+                    )
+                    self._cached_screen = screen
+                    self._screen_cached_at = self._clock.now()
                 accepted_rows, rejected = hard_filter_rows(
                     screen.rows,
                     listing_map,
@@ -435,9 +475,31 @@ class USUniversePaperRunner:
                     for candidate in preliminary_ranked[: self.config.minute_bar_candidates]
                 ]
                 selected_codes.extend(code for code in held_codes if code not in selected_codes)
-                if selected_codes:
-                    bars = market.fetch_minute_bars(
+                cache_max_age = max(0, self.config.minute_bar_refresh_interval_seconds - 1)
+                refresh_codes = [
+                    code
+                    for code in selected_codes
+                    if self.store.load_cached_bars(
+                        code,
+                        interval="1m",
+                        now=now,
+                        max_age_seconds=cache_max_age,
+                    )
+                    is None
+                ]
+                scheduled_fetch = cast(
+                    Callable[..., Mapping[str, tuple[USOHLCVBar, ...]]] | None,
+                    getattr(market, "fetch_minute_bars_with_refresh", None),
+                )
+                if scheduled_fetch is not None:
+                    bars = scheduled_fetch(
                         selected_codes,
+                        refresh_codes=refresh_codes,
+                        count=self.config.minute_bar_count,
+                    )
+                elif refresh_codes:
+                    bars = market.fetch_minute_bars(
+                        refresh_codes,
                         count=self.config.minute_bar_count,
                     )
                 for error in market.errors[source_error_count:]:
@@ -539,6 +601,8 @@ class USUniversePaperRunner:
             screen_total_count=screen.total_count,
             screen_pages=screen.pages,
             screen_truncated=screen.truncated,
+            screen_cache_hit=screen_cache_hit,
+            screen_refreshed_at=self._screen_cached_at,
             rejected=rejected,
             candidates=ranked,
             snapshots=snapshots,
@@ -553,6 +617,18 @@ class USUniversePaperRunner:
             recorded_at=now,
         )
         return result
+
+    def _screen_cache_is_fresh(self, now: datetime) -> bool:
+        if self._cached_screen is None or self._screen_cached_at is None:
+            return False
+        age_seconds = (now - self._screen_cached_at).total_seconds()
+        return 0 <= age_seconds < self.config.screen_refresh_interval_seconds
+
+    def _screen_refresh_is_due(self, now: datetime) -> bool:
+        if self._screen_attempted_at is None:
+            return True
+        age_seconds = (now - self._screen_attempted_at).total_seconds()
+        return age_seconds < 0 or age_seconds >= self.config.screen_refresh_interval_seconds
 
     async def decide(
         self,
@@ -1000,19 +1076,30 @@ class USUniversePaperRunner:
         usd_jpy_rate: Decimal | None = None,
         sleep: Callable[[float], Any] = asyncio.sleep,
     ) -> tuple[USPaperStepResult, ...]:
+        if steps == 0:
+            return ()
+        if self._active_market is not None:
+            raise RuntimeError("paper_run cannot be started inside an active market session")
         results: list[USPaperStepResult] = []
-        while steps is None or len(results) < steps:
-            results.append(await self.paper_step(dry_run=dry_run, usd_jpy_rate=usd_jpy_rate))
-            if steps is not None and len(results) >= steps:
-                break
-            await sleep(self.config.decision_interval_seconds)
+        with self._market_source_factory() as market:
+            self._active_market = market
+            try:
+                while steps is None or len(results) < steps:
+                    results.append(
+                        await self.paper_step(dry_run=dry_run, usd_jpy_rate=usd_jpy_rate)
+                    )
+                    if steps is not None and len(results) >= steps:
+                        break
+                    await sleep(self.config.decision_interval_seconds)
+            finally:
+                self._active_market = None
         return tuple(results)
 
     def portfolio(self) -> USPaperPortfolio | None:
         return self.store.load_portfolio(self.config.portfolio_id)
 
     def history_kline_quota(self) -> Mapping[str, Any]:
-        with self._market_source_factory() as market:
+        with self._market_session() as market:
             return market.history_kline_quota()
 
     @property

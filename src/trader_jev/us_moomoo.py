@@ -350,35 +350,69 @@ class MoomooUSMarketAdapter:
         *,
         count: int | None = None,
     ) -> Mapping[str, tuple[USOHLCVBar, ...]]:
-        """Subscribe only to selected symbols; quota failure returns no bars."""
+        """Subscribe to selected symbols and fetch their current minute bars."""
 
-        if not codes:
+        return self.fetch_minute_bars_with_refresh(codes, refresh_codes=codes, count=count)
+
+    def fetch_minute_bars_with_refresh(
+        self,
+        codes: Sequence[str],
+        *,
+        refresh_codes: Sequence[str],
+        count: int | None = None,
+    ) -> Mapping[str, tuple[USOHLCVBar, ...]]:
+        """Reconcile subscriptions and fetch only bars requested by the runner's cadence."""
+
+        if not codes and not self._subscribed_codes:
             return {}
+        codes = tuple(dict.fromkeys(codes))
+        refresh_code_set = set(refresh_codes).intersection(codes)
         sdk = self._sdk()
-        try:
-            subscription = self._call("query_subscription", is_all_conn=True)
-        except USMoomooError as exc:
-            self.errors.append(
-                USMoomooError(
-                    USMoomooFailureKind.SUBSCRIPTION_QUOTA,
-                    "could not read realtime candlestick subscription quota",
-                    method="query_subscription",
-                )
-            )
-            self.errors.append(exc)
-            return {}
-        remaining = _subscription_remaining(subscription)
-        if remaining is None:
-            self.errors.append(
-                USMoomooError(
-                    USMoomooFailureKind.SUBSCRIPTION_QUOTA,
-                    "subscription quota state did not include a remaining count",
-                    method="query_subscription",
-                )
-            )
-            return {}
         already_subscribed = [code for code in codes if code in self._subscribed_codes]
         to_subscribe = [code for code in codes if code not in self._subscribed_codes]
+
+        subtype = getattr(sdk.SubType, self.config.minute_bar_type)
+        kline_type = getattr(sdk.KLType, self.config.minute_bar_type)
+        no_longer_selected = sorted(self._subscribed_codes - set(codes))
+        if no_longer_selected:
+            try:
+                self._call(
+                    "unsubscribe",
+                    no_longer_selected,
+                    [subtype],
+                    limiter=self._snapshot_limiter,
+                )
+            except USMoomooError as exc:
+                self.errors.append(exc)
+            else:
+                self._subscribed_codes.difference_update(no_longer_selected)
+
+        remaining = 0
+        if to_subscribe:
+            try:
+                subscription = self._call("query_subscription", is_all_conn=True)
+            except USMoomooError as exc:
+                self.errors.append(
+                    USMoomooError(
+                        USMoomooFailureKind.SUBSCRIPTION_QUOTA,
+                        "could not read realtime candlestick subscription quota",
+                        method="query_subscription",
+                    )
+                )
+                self.errors.append(exc)
+            else:
+                remaining_value = _subscription_remaining(subscription)
+                if remaining_value is None:
+                    self.errors.append(
+                        USMoomooError(
+                            USMoomooFailureKind.SUBSCRIPTION_QUOTA,
+                            "subscription quota state did not include a remaining count",
+                            method="query_subscription",
+                        )
+                    )
+                else:
+                    remaining = remaining_value
+
         unavailable_count = max(0, len(to_subscribe) - max(0, remaining))
         if unavailable_count:
             self.errors.append(
@@ -390,16 +424,15 @@ class MoomooUSMarketAdapter:
             )
         selected = already_subscribed + to_subscribe[: max(0, remaining)]
         if not selected:
-            self.errors.append(
-                USMoomooError(
-                    USMoomooFailureKind.SUBSCRIPTION_QUOTA,
-                    "no realtime candlestick subscription quota remains",
-                    method="query_subscription",
+            if codes:
+                self.errors.append(
+                    USMoomooError(
+                        USMoomooFailureKind.SUBSCRIPTION_QUOTA,
+                        "no realtime candlestick subscription quota remains",
+                        method="query_subscription",
+                    )
                 )
-            )
             return {}
-        subtype = getattr(sdk.SubType, self.config.minute_bar_type)
-        kline_type = getattr(sdk.KLType, self.config.minute_bar_type)
         newly_selected = [code for code in selected if code not in self._subscribed_codes]
         if newly_selected:
             try:
@@ -417,6 +450,8 @@ class MoomooUSMarketAdapter:
 
         bars_by_code: dict[str, tuple[USOHLCVBar, ...]] = {}
         for code in selected:
+            if code not in refresh_code_set:
+                continue
             try:
                 data = self._call(
                     "get_cur_kline",

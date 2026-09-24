@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
-from datetime import datetime
+from datetime import datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
 from typing import Any
@@ -12,6 +12,7 @@ import pytest
 from trader_jev.clock import FixedClock
 from trader_jev.us_equity import (
     USMarketSnapshot,
+    USOHLCVBar,
     USPaperPortfolio,
     USScreenRow,
     USUniverseListing,
@@ -154,7 +155,118 @@ def test_config_rejects_inconsistent_final_blend_weights(tmp_path: Path) -> None
 
 
 def test_universe_refresh_defaults_to_weekly() -> None:
-    assert USPaperConfig().universe_refresh_days == 7
+    config = USPaperConfig()
+
+    assert config.universe_refresh_days == 7
+    assert config.screen_refresh_interval_seconds == 300
+    assert config.minute_bar_refresh_interval_seconds == 60
+    assert config.decision_interval_seconds == 30
+
+
+def test_scan_reuses_screen_results_but_refreshes_snapshots_every_step(tmp_path: Path) -> None:
+    config = _config(tmp_path / "paper.sqlite3")
+    clock = _MutableClock(NOW)
+    stats: dict[str, Any] = {"screen_calls": 0, "snapshot_calls": 0}
+    runner = USUniversePaperRunner(
+        config,
+        USUniversePaperStore(config.database_path),
+        market_source_factory=lambda: _CountingMarketSource(stats),
+        clock=clock,
+    )
+
+    first = runner.scan()
+    clock.advance(30)
+    second = runner.scan()
+    clock.advance(270)
+    third = runner.scan()
+
+    assert stats["screen_calls"] == 2
+    assert stats["snapshot_calls"] == 3
+    assert not first.screen_cache_hit
+    assert second.screen_cache_hit
+    assert second.screen_refreshed_at == NOW
+    assert not third.screen_cache_hit
+
+
+def test_failed_screen_refresh_uses_last_successful_cache_without_retry_storm(
+    tmp_path: Path,
+) -> None:
+    config = _config(tmp_path / "paper.sqlite3")
+    clock = _MutableClock(NOW)
+    stats: dict[str, Any] = {"screen_calls": 0, "snapshot_calls": 0}
+    runner = USUniversePaperRunner(
+        config,
+        USUniversePaperStore(config.database_path),
+        market_source_factory=lambda: _CountingMarketSource(stats, fail_screen_calls={2}),
+        clock=clock,
+    )
+
+    first = runner.scan()
+    clock.advance(300)
+    failed_refresh = runner.scan()
+    clock.advance(30)
+    cached_fallback = runner.scan()
+
+    assert first.candidate_count == 1
+    assert failed_refresh.candidate_count == 0
+    assert cached_fallback.candidate_count == 1
+    assert cached_fallback.screen_cache_hit
+    assert cached_fallback.screen_refreshed_at == NOW
+    assert stats["screen_calls"] == 2
+
+
+def test_scan_fetches_each_minute_bar_only_after_its_cache_expires(tmp_path: Path) -> None:
+    config = _config(tmp_path / "paper.sqlite3").model_copy(update={"minute_bar_candidates": 1})
+    clock = _MutableClock(NOW)
+    stats: dict[str, Any] = {"screen_calls": 0, "snapshot_calls": 0, "bar_refreshes": []}
+    runner = USUniversePaperRunner(
+        config,
+        USUniversePaperStore(config.database_path),
+        market_source_factory=lambda: _CountingMarketSource(stats),
+        clock=clock,
+    )
+
+    runner.scan()
+    clock.advance(30)
+    runner.scan()
+    clock.advance(30)
+    runner.scan()
+
+    assert stats["bar_refreshes"] == [
+        ((CODE,), (CODE,)),
+        ((CODE,), ()),
+        ((CODE,), (CODE,)),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_paper_run_keeps_one_market_context_open_across_steps(tmp_path: Path) -> None:
+    config = _config(tmp_path / "paper.sqlite3")
+    stats: dict[str, Any] = {"created": 0, "entered": 0, "exited": 0}
+    jev = _FakeJevClient()
+
+    def market_factory() -> _CountingMarketSource:
+        stats["created"] += 1
+        return _CountingMarketSource(stats)
+
+    async def no_sleep(_seconds: float) -> None:
+        return None
+
+    runner = USUniversePaperRunner(
+        config,
+        USUniversePaperStore(config.database_path),
+        market_source_factory=market_factory,
+        jev_client=jev,
+        clock=FixedClock(NOW),
+    )
+
+    results = await runner.paper_run(steps=2, dry_run=True, sleep=no_sleep)
+
+    assert len(results) == 2
+    assert jev.calls == 2
+    assert stats["created"] == 1
+    assert stats["entered"] == 1
+    assert stats["exited"] == 1
 
 
 def _config(path: Path) -> USPaperConfig:
@@ -174,6 +286,17 @@ def _config(path: Path) -> USPaperConfig:
 
 def _market_factory() -> _FakeMarketSource:
     return _FakeMarketSource()
+
+
+class _MutableClock:
+    def __init__(self, now: datetime) -> None:
+        self._now = now
+
+    def now(self) -> datetime:
+        return self._now
+
+    def advance(self, seconds: int) -> None:
+        self._now += timedelta(seconds=seconds)
 
 
 class _FakeMarketSource:
@@ -221,6 +344,73 @@ class _FakeMarketSource:
 
     def history_kline_quota(self) -> Mapping[str, Any]:
         return {"used_quota": 0, "remain_quota": 100}
+
+
+class _CountingMarketSource(_FakeMarketSource):
+    def __init__(
+        self,
+        stats: dict[str, Any],
+        *,
+        fail_screen_calls: set[int] | None = None,
+    ) -> None:
+        self.stats = stats
+        self.fail_screen_calls = fail_screen_calls or set()
+        self.errors: list[USMoomooError] = []
+        self.stats.setdefault("screen_calls", 0)
+        self.stats.setdefault("snapshot_calls", 0)
+        self.stats.setdefault("bar_refreshes", [])
+
+    def __enter__(self) -> _CountingMarketSource:
+        self.stats["entered"] = self.stats.get("entered", 0) + 1
+        return self
+
+    def __exit__(self, exc_type: object, exc: object, traceback: object) -> None:
+        del exc_type, exc, traceback
+        self.stats["exited"] = self.stats.get("exited", 0) + 1
+
+    def screen_us(
+        self,
+        *,
+        min_price_usd: Decimal,
+        min_market_cap_usd: Decimal,
+        min_avg_turnover_20d_usd: Decimal,
+        min_listing_days: int | None,
+        max_rows: int = 2000,
+    ) -> ScreenFetch:
+        self.stats["screen_calls"] += 1
+        if self.stats["screen_calls"] in self.fail_screen_calls:
+            raise USMoomooError("RATE_LIMIT", "simulated screener rate limit")
+        return super().screen_us(
+            min_price_usd=min_price_usd,
+            min_market_cap_usd=min_market_cap_usd,
+            min_avg_turnover_20d_usd=min_avg_turnover_20d_usd,
+            min_listing_days=min_listing_days,
+            max_rows=max_rows,
+        )
+
+    def fetch_snapshots(self, codes: Sequence[str]) -> Mapping[str, USMarketSnapshot]:
+        self.stats["snapshot_calls"] += 1
+        return super().fetch_snapshots(codes)
+
+    def fetch_minute_bars_with_refresh(
+        self,
+        codes: Sequence[str],
+        *,
+        refresh_codes: Sequence[str],
+        count: int | None = None,
+    ) -> Mapping[str, tuple[USOHLCVBar, ...]]:
+        del count
+        self.stats["bar_refreshes"].append((tuple(codes), tuple(refresh_codes)))
+        bar = USOHLCVBar(
+            timestamp=NOW,
+            open=Decimal("20"),
+            high=Decimal("20.2"),
+            low=Decimal("19.9"),
+            close=Decimal("20.1"),
+            volume=Decimal("1000"),
+            turnover=Decimal("20100"),
+        )
+        return {code: (bar,) for code in refresh_codes}
 
 
 class _UnexpectedMarketSource(_FakeMarketSource):

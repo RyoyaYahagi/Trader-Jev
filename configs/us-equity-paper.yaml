@@ -10,12 +10,14 @@ min_market_cap_usd: 300000000
 min_avg_turnover_20d_usd: 10000000
 min_listing_days: 90
 max_screen_rows: 2000
+screen_refresh_interval_seconds: 300
 
 lane_top_k: 50
 union_limit: 200
 minute_bar_candidates: 30
 jev_candidates: 30
 minute_bar_count: 390
+minute_bar_refresh_interval_seconds: 60
 cached_bars_max_age_seconds: 120
 max_quote_age_seconds: 15
 decision_interval_seconds: 30

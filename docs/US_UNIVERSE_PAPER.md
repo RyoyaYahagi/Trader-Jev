@@ -9,10 +9,10 @@ moomooのQuoteContextだけを使います。取引、口座、注文、実ポ�
 `configs/us-equity-paper.yaml` が既定の設定例です。主な初期条件は次のとおりです。
 
 - 米国上場普通株。ETFとOTCは初期設定で除外。
-- 銘柄マスターは既定7日ごとに更新。`universe-update`で手動更新でき、候補スクリーニングと順位付けは各スキャンで再計算。
+- 銘柄マスターは既定7日ごとに更新。`universe-update`で手動更新できます。市場全体のスクリーナー結果は既定300秒ごとに更新し、キャッシュ中も価格取得・候補順位・Jev判断は各30秒のPaperステップで更新します。
 - 価格3 USD以上、時価総額3億USD以上、20営業日平均売買代金1,000万USD以上、上場90日以上。
 - スクリーナー最大2,000行。momentum / breakout / reversal / liquid の各laneで上位50銘柄を選び、重複を除いて最大200銘柄を残す。
-- 候補上位30銘柄と保有銘柄だけ、必要なときに1分足を購読する。購読枠が足りないときは残っているスクリーナー・snapshot情報で評価し、取得できない特徴量はnullのまま保存する。
+- 候補上位30銘柄と保有銘柄だけ、必要なときに1分足を購読する。購読は`paper-run`中に維持し、銘柄ごとの足データ取得は既定60秒ごとです。候補から外れた銘柄の購読を解除します。購読枠が足りないときは残っているスクリーナー・snapshot情報で評価し、取得できない特徴量はnullのまま保存します。
 - Jev対象は最大30銘柄。量的スコアとJevスコアの合成比率、信頼度・異常確率のゲートはYAMLで調整できる。
 - 初期資金は10万円。JPY現金を10%確保し、残りをPaperBroker用USD現金として扱う。銘柄ごとの上限は資産の30%、保有上限は3銘柄。
 - 米国東部時間の通常取引時間だけ注文候補を評価する。週末、米国休場日、早引けを`NasdaqCalendar`で扱う。
@@ -36,7 +36,9 @@ uv run trader-jev --config configs/us-equity-paper.yaml history-quota
 
 `decide`とPaperコマンドでは既存の`.env`または環境変数のJev Gateway設定を使います。`paper-step --dry-run`はPaperBrokerの仮想約定まで計算しますが、ポートフォリオ状態は更新しません。監査記録、スクリーニング結果、特徴量、Jev入出力、仮想注文・約定候補はSQLiteへ保存します。
 
-`paper-run`は`--steps`を省略すると停止まで繰り返し、`decision_interval_seconds`ごとに次のスキャンを始めます。最初の実行前に`--dry-run`で接続、入力、判定、仮想約定を確認してください。
+`paper-run`は`--steps`を省略すると停止まで繰り返し、`decision_interval_seconds`ごとに次のステップへ進みます。1回の実行中はmoomoo OpenDのQuoteContextを維持し、各ステップで価格snapshotを取得します。候補順位は新しいsnapshotを使って毎回再計算します。市場全体のスクリーナー結果だけは`screen_refresh_interval_seconds`が経過するまで再利用します。1分足は保存時刻から`minute_bar_refresh_interval_seconds`が経過してから再取得し、それまではキャッシュを使います。スキャン結果にはスクリーナーキャッシュの利用有無と、最後に取得した時刻を記録します。最初の実行前に`--dry-run`で接続、入力、判定、仮想約定を確認してください。
+
+スクリーナー更新に失敗したときは、5分間は再試行しません。直近の成功結果があればそのキャッシュを使い、成功結果がまだなければそのステップでは候補を作りません。
 
 ## 候補と判断の記録
 
@@ -49,9 +51,9 @@ Jevには選択型のセットアップ分類、0〜1のトレンド・継続ス
 ## moomoo APIの制限
 
 - Static infoからU.S.のstock listingを保存し、ETFは設定で追加取得します。ローカルhard filterが取引所、delisting、security type、最低価格、時価総額、平均売買代金、上場日数を再確認します。判定不能な必須値は不適格として記録します。
-- Stock Screener V2は1ページ最大200件、最大10回/30秒の制限を守ります。`max_screen_rows`に届いたときはtruncatedをsummaryに記録します。
+- Stock Screener V2は既定300秒ごとに実行します。1ページ最大200件、最大10回/30秒の制限を守ります。`max_screen_rows`に届いたときはtruncatedをsummaryに記録します。
 - Snapshot要求は最大400銘柄/回、最大60回/30秒に制限します。
-- 1分足はrealtime購読後に取得し、`get_cur_kline`を使います。購読枠を事前照会し、quota不足・permission errorはNO TRADE可能な情報として記録します。過去Kline APIは呼び出さず、`history-quota`は現在のquotaを読むだけです。
+- 1分足はrealtime購読後に取得し、銘柄ごとに既定60秒ごとに`get_cur_kline`を呼び出します。`paper-run`中はQuoteContextと購読を維持し、候補の入れ替わりに合わせて購読を追加・解除します。購読枠を事前照会し、quota不足・permission errorはNO TRADE可能な情報として記録します。過去Kline APIは呼び出さず、`history-quota`は現在のquotaを読むだけです。
 - AdapterはSDK固有のDataFrameや値を正規化し、coreにはmarket-neutralモデルだけを返します。
 
 詳細と制限は[Moomoo公式 Stock Screener V2](https://openapi.moomoo.com/moomoo-api-doc/en/quote/get-stock-screen.html)、[基本銘柄情報](https://openapi.moomoo.com/moomoo-api-doc/en/quote/get-static-info.html)、[market snapshot](https://openapi.moomoo.com/moomoo-api-doc/en/quote/get-market-snapshot.html)、[リアルタイムKline](https://openapi.moomoo.com/moomoo-api-doc/en/quote/get-kl.html)、[購読管理](https://openapi.moomoo.com/moomoo-api-doc/en/quote/sub.html)を参照してください。

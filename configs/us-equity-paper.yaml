@@ -11,6 +11,7 @@ min_avg_turnover_20d_usd: 10000000
 min_listing_days: 90
 max_screen_rows: 2000
 screen_refresh_interval_seconds: 300
+startup_screen_cache_max_age_seconds: 86400
 
 lane_top_k: 50
 union_limit: 200

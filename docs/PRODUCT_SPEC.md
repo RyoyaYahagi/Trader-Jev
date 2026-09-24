@@ -52,12 +52,12 @@ Market data sourceはBroker APIに固定しない。Historical dataset / file / 
 - 15分・30分の予測は、対応するJev質問セットを追加した後のバックログ候補とする
 - Initial decision interval: 30秒相当
 - 探索候補: 15秒 / 30秒 / 60秒
-- 初期 Forward Paper 対象: 固定10銘柄
+- 夜間の米国株Forward Paper対象: 全銘柄スキャンから動的に選定
 - Replayでも各candidateのdecision cadenceを再現可能にする
 
 ## 5. Universe
 
-既存の初期 Forward Paper は固定10銘柄を使う。追加の研究プロファイルとして、米国上場株の読み取り専用ユニバース更新と動的スクリーニングを利用できる。これは固定10銘柄の既定経路を置き換えない。
+夜間の米国株Paper運用では、読み取り専用の銘柄情報・スクリーナーから候補を動的に選ぶ。固定10銘柄のForward Paper実行経路も比較実験や手動運用用に残すが、夜間の定期実行には使わない。
 
 選定条件:
 
@@ -69,9 +69,9 @@ Market data sourceはBroker APIに固定しない。Historical dataset / file / 
 10万円制約は銘柄選定条件にしない。
 
 その後:
-1. 固定10銘柄（初期 Forward Paper の既定）
+1. 動的選定（夜間の米国株Paper運用）
 2. 主要指数銘柄
-3. 動的選定（任意の米国株研究プロファイルとして利用可能）
+3. 固定10銘柄を含む比較用ユニバース
 
 Phase 1完了後は月次見直しを可能にする。
 
@@ -230,7 +230,7 @@ Stage 1:
 Stage 2:
 - 読み取り専用のmoomoo OpenD market snapshotをRealtime Adapterから取得
 - OpenD停止・権限エラー・欠損bid/askはfail closed
-- 米国株の任意研究プロファイルで銘柄情報・スクリーナー・snapshot・購読済み1分足を取得
+- 夜間の米国株Paper運用で銘柄情報・スクリーナー・snapshot・購読済み1分足を取得
 
 Stage 3:
 - L2 dataが入手可能になった場合にL2-aware replay/featureへ拡張

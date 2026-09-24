@@ -25,16 +25,17 @@ Market dataはHistorical / Replayを優先する。Forward Paperで必要な場�
 
 ## Initial universe
 
-- 初期 Forward Paper は固定10銘柄
+- 夜間の米国株Forward Paperは、銘柄マスターを使って全銘柄から動的に選ぶ
 - 流動性 + 業種分散 + 日中ボラティリティ
 - 月次見直しは後段
 - 10万円で1単元買えることを選定条件にしない
-- 米国株の任意研究プロファイルでは、読み取り専用の銘柄情報・スクリーナーで候補を更新できる。これは固定10銘柄の既定運用を変更しない
+- 固定10銘柄のForward Paperは比較実験・手動実行用に残す。夜間タイマーは米国株ユニバース方式を使う
 
 ## Timing
 
 - prediction horizon: 5分（15分・30分は質問セット整備後の候補）
 - decision cadence: 30秒相当
+- 米国株夜間運用の候補判定は30秒ごと、全銘柄スクリーナーは300秒ごと
 - cadence探索: 15秒 / 30秒 / 60秒
 - U.S. forward paper: NASDAQ regular session 09:30〜16:00 ET
 - U.S. daylight saving time and standard time are resolved by `America/New_York`

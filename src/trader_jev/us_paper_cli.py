@@ -87,6 +87,7 @@ class USPaperConfig(DomainModel):
     min_listing_days: int = Field(default=90, ge=0)
     max_screen_rows: int = Field(default=2000, gt=0)
     screen_refresh_interval_seconds: int = Field(default=300, gt=0)
+    startup_screen_cache_max_age_seconds: int = Field(default=86400, ge=0)
     lane_top_k: int = Field(default=50, gt=0)
     union_limit: int = Field(default=200, gt=0)
     minute_bar_candidates: int = Field(default=30, ge=0)
@@ -215,6 +216,18 @@ class USPaperStepResult(DomainModel):
     scan: USScanResult | None = None
 
 
+class USPaperRunSummary(DomainModel):
+    """Bounded summary for a session-long Paper process."""
+
+    started_at: datetime
+    ended_at: datetime
+    steps_completed: int = Field(ge=0)
+    stop_reason: str
+    last_run_id: str | None = None
+    last_status: str | None = None
+    last_reason: str | None = None
+
+
 class USShareSizingPolicy:
     """Size long entries against a per-position cap and reserve-aware USD cash."""
 
@@ -284,6 +297,21 @@ class USUniversePaperRunner:
         self._cached_screen: ScreenFetch | None = None
         self._screen_cached_at: datetime | None = None
         self._screen_attempted_at: datetime | None = None
+        self._startup_screen_cache_pending = False
+        cached_screen = self.store.load_latest_screen(
+            now=self._clock.now(),
+            max_age_seconds=self.config.startup_screen_cache_max_age_seconds,
+        )
+        if cached_screen is not None:
+            self._cached_screen = ScreenFetch(
+                cached_screen.rows,
+                cached_screen.total_count,
+                cached_screen.truncated,
+                cached_screen.pages,
+            )
+            self._screen_cached_at = cached_screen.refreshed_at
+            self._screen_attempted_at = cached_screen.refreshed_at
+            self._startup_screen_cache_pending = True
 
     @contextmanager
     def _market_session(self) -> Generator[USMarketSource, None, None]:
@@ -310,6 +338,7 @@ class USUniversePaperRunner:
         self._cached_screen = None
         self._screen_cached_at = None
         self._screen_attempted_at = None
+        self._startup_screen_cache_pending = False
         return listings
 
     def scan(self) -> USScanResult:
@@ -358,7 +387,12 @@ class USUniversePaperRunner:
         try:
             with self._market_session() as market:
                 market.errors.clear()
-                if self._screen_cache_is_fresh(now):
+                if self._startup_screen_cache_pending and self._cached_screen is not None:
+                    screen = self._cached_screen
+                    screen_cache_hit = True
+                    self._startup_screen_cache_pending = False
+                    self._screen_attempted_at = now
+                elif self._screen_cache_is_fresh(now):
                     cached_screen = self._cached_screen
                     if cached_screen is None:
                         raise RuntimeError("fresh screener cache is missing")
@@ -384,6 +418,7 @@ class USUniversePaperRunner:
                     )
                     self._cached_screen = screen
                     self._screen_cached_at = self._clock.now()
+                    self._startup_screen_cache_pending = False
                 accepted_rows, rejected = hard_filter_rows(
                     screen.rows,
                     listing_map,
@@ -751,14 +786,16 @@ class USUniversePaperRunner:
         *,
         dry_run: bool = False,
         usd_jpy_rate: Decimal | None = None,
+        usd_jpy_as_of: str | None = None,
+        usd_jpy_source: str | None = None,
     ) -> USPaperStepResult:
         now = self._clock.now()
         run_id = str(uuid4())
         current = self.store.load_portfolio(self.config.portfolio_id)
         if usd_jpy_rate is not None:
             rate = usd_jpy_rate
-            fx_source = "command-line override"
-            fx_as_of = now.astimezone(UTC).isoformat()
+            fx_source = usd_jpy_source or "command-line override"
+            fx_as_of = usd_jpy_as_of or now.astimezone(UTC).isoformat()
         elif self.config.usd_jpy_rate is not None:
             rate = self.config.usd_jpy_rate
             fx_source = self.config.fx_source or "configuration"
@@ -1074,25 +1111,69 @@ class USUniversePaperRunner:
         steps: int | None,
         dry_run: bool,
         usd_jpy_rate: Decimal | None = None,
+        usd_jpy_as_of: str | None = None,
+        usd_jpy_source: str | None = None,
+        until_market_close: bool = False,
         sleep: Callable[[float], Any] = asyncio.sleep,
-    ) -> tuple[USPaperStepResult, ...]:
+    ) -> tuple[USPaperStepResult, ...] | USPaperRunSummary:
         if steps == 0:
+            if until_market_close:
+                started_at = self._clock.now()
+                return USPaperRunSummary(
+                    started_at=started_at,
+                    ended_at=started_at,
+                    steps_completed=0,
+                    stop_reason="step_limit",
+                )
             return ()
         if self._active_market is not None:
             raise RuntimeError("paper_run cannot be started inside an active market session")
+        started_at = self._clock.now()
+        if until_market_close and not _inside_regular_session(started_at, self._calendar):
+            return USPaperRunSummary(
+                started_at=started_at,
+                ended_at=started_at,
+                steps_completed=0,
+                stop_reason="market_closed",
+            )
         results: list[USPaperStepResult] = []
+        last_result: USPaperStepResult | None = None
+        steps_completed = 0
+        stop_reason = "step_limit"
         with self._market_source_factory() as market:
             self._active_market = market
             try:
-                while steps is None or len(results) < steps:
-                    results.append(
-                        await self.paper_step(dry_run=dry_run, usd_jpy_rate=usd_jpy_rate)
+                while steps is None or steps_completed < steps:
+                    if until_market_close and not _inside_regular_session(
+                        self._clock.now(), self._calendar
+                    ):
+                        stop_reason = "market_closed"
+                        break
+                    last_result = await self.paper_step(
+                        dry_run=dry_run,
+                        usd_jpy_rate=usd_jpy_rate,
+                        usd_jpy_as_of=usd_jpy_as_of,
+                        usd_jpy_source=usd_jpy_source,
                     )
-                    if steps is not None and len(results) >= steps:
+                    steps_completed += 1
+                    if not until_market_close:
+                        results.append(last_result)
+                    if steps is not None and steps_completed >= steps:
+                        stop_reason = "step_limit"
                         break
                     await sleep(self.config.decision_interval_seconds)
             finally:
                 self._active_market = None
+        if until_market_close:
+            return USPaperRunSummary(
+                started_at=started_at,
+                ended_at=self._clock.now(),
+                steps_completed=steps_completed,
+                stop_reason=stop_reason,
+                last_run_id=last_result.run_id if last_result is not None else None,
+                last_status=last_result.status if last_result is not None else None,
+                last_reason=last_result.reason if last_result is not None else None,
+            )
         return tuple(results)
 
     def portfolio(self) -> USPaperPortfolio | None:
@@ -1322,10 +1403,19 @@ def build_parser() -> argparse.ArgumentParser:
     step = subparsers.add_parser("paper-step", help="run one Jev and PaperBroker step")
     step.add_argument("--dry-run", action="store_true")
     step.add_argument("--usd-jpy", type=_decimal_arg)
+    step.add_argument("--usd-jpy-as-of")
+    step.add_argument("--usd-jpy-source")
     run = subparsers.add_parser("paper-run", help="repeat paper steps at the configured interval")
     run.add_argument("--steps", type=_positive_int_arg)
     run.add_argument("--dry-run", action="store_true")
     run.add_argument("--usd-jpy", type=_decimal_arg)
+    run.add_argument("--usd-jpy-as-of")
+    run.add_argument("--usd-jpy-source")
+    run.add_argument(
+        "--until-market-close",
+        action="store_true",
+        help="stop at the end of the current regular U.S. equity session",
+    )
     subparsers.add_parser("portfolio", help="show the persisted paper portfolio")
     subparsers.add_parser(
         "history-quota", help="read moomoo historical-kline quota without using it"
@@ -1365,7 +1455,14 @@ def main(argv: Sequence[str] | None = None) -> int:
             scan, opinions = asyncio.run(runner.decide())
             _print_json({"scan": scan, "opinions": opinions})
         elif args.command == "paper-step":
-            result = asyncio.run(runner.paper_step(dry_run=args.dry_run, usd_jpy_rate=args.usd_jpy))
+            result = asyncio.run(
+                runner.paper_step(
+                    dry_run=args.dry_run,
+                    usd_jpy_rate=args.usd_jpy,
+                    usd_jpy_as_of=args.usd_jpy_as_of,
+                    usd_jpy_source=args.usd_jpy_source,
+                )
+            )
             _print_json(result)
         elif args.command == "paper-run":
             results = asyncio.run(
@@ -1373,6 +1470,9 @@ def main(argv: Sequence[str] | None = None) -> int:
                     steps=args.steps,
                     dry_run=args.dry_run,
                     usd_jpy_rate=args.usd_jpy,
+                    usd_jpy_as_of=args.usd_jpy_as_of,
+                    usd_jpy_source=args.usd_jpy_source,
+                    until_market_close=args.until_market_close,
                 )
             )
             _print_json(results)
@@ -1646,7 +1746,7 @@ def _inside_regular_session(now: datetime, calendar: NasdaqCalendar) -> bool:
     if session is None:
         return False
     eastern_now = now.astimezone(US_EASTERN)
-    return session.open_at <= eastern_now <= session.close_at
+    return session.open_at <= eastern_now < session.close_at
 
 
 def _load_env(path: Path) -> Mapping[str, str]:

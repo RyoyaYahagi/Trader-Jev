@@ -31,7 +31,7 @@ DecisionSnapshot
 
 実行経路はPaperBrokerのみ実装対象。リアルタイム入力として、読み取り専用の`MoomooMarketDataAdapter`を使用できる。
 
-米国株には、`USUniversePaperRunner`による任意の研究経路がある。銘柄情報とスクリーナー結果から候補を絞り、snapshotと購読済み1分足を使って特徴を作り、Jev判断をRiskEngine経由でPaperBrokerへ渡す。この経路も証券APIによる発注・口座照会を含まない。初期 Forward Paper の固定10銘柄設定は独立して維持する。
+米国株の夜間定期実行には、`USUniversePaperRunner`を使う。銘柄情報とスクリーナー結果から候補を絞り、snapshotと購読済み1分足を使って特徴を作り、Jev判断をRiskEngine経由でPaperBrokerへ渡す。この経路も証券APIによる発注・口座照会を含まない。固定10銘柄のForward Paper設定は比較実験や手動実行用に残す。
 
 ## 2. Broker API policy
 

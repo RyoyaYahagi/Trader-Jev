@@ -10,7 +10,7 @@ from datetime import UTC, date, datetime, time
 from decimal import Decimal, InvalidOperation
 from enum import StrEnum
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 from uuid import uuid4
 from zoneinfo import ZoneInfo
 
@@ -77,6 +77,17 @@ class USScreenRow(DomainModel):
             if value is not None and not value.is_finite():
                 raise ValueError(f"{name} must be finite")
         return self
+
+
+class USScreenCacheSnapshot(DomainModel):
+    """Persisted screener rows available to bootstrap a later Paper process."""
+
+    run_id: str
+    refreshed_at: datetime
+    rows: tuple[USScreenRow, ...]
+    total_count: int = Field(ge=0)
+    truncated: bool
+    pages: int = Field(ge=0)
 
 
 class USOHLCVBar(DomainModel):
@@ -411,6 +422,70 @@ class USUniversePaperStore:
             ).fetchall()
         listings = tuple(USUniverseListing.model_validate_json(item[0]) for item in records)
         return snapshot_id, datetime.fromisoformat(recorded_at_raw), listings
+
+    def load_latest_screen(
+        self,
+        *,
+        now: datetime,
+        max_age_seconds: int,
+    ) -> USScreenCacheSnapshot | None:
+        """Load the newest complete, successful screener result within its bootstrap age."""
+
+        if now.tzinfo is None or now.utcoffset() is None:
+            raise ValueError("now must be timezone-aware")
+        if max_age_seconds < 0:
+            raise ValueError("max_age_seconds must be non-negative")
+        with self._connect() as db:
+            summaries = db.execute(
+                """SELECT run_id, payload_json FROM run_summaries
+                   WHERE run_id IN (SELECT DISTINCT run_id FROM screening_results)
+                   ORDER BY recorded_at DESC LIMIT 100"""
+            ).fetchall()
+            for run_id_raw, summary_json in summaries:
+                try:
+                    summary_value = json.loads(str(summary_json))
+                    if not isinstance(summary_value, Mapping):
+                        continue
+                    summary = cast(Mapping[str, Any], summary_value)
+                    refreshed_at_raw = summary.get("screen_refreshed_at")
+                    if not isinstance(refreshed_at_raw, str):
+                        continue
+                    refreshed_at = datetime.fromisoformat(refreshed_at_raw.replace("Z", "+00:00"))
+                    age_seconds = (now - refreshed_at).total_seconds()
+                    if age_seconds < 0 or age_seconds > max_age_seconds:
+                        continue
+                    total_count = int(summary["screen_total_count"])
+                    truncated = bool(summary["screen_truncated"])
+                    pages = int(summary["screen_pages"])
+                    records = db.execute(
+                        "SELECT payload_json FROM screening_results "
+                        "WHERE run_id = ? ORDER BY symbol",
+                        (str(run_id_raw),),
+                    ).fetchall()
+                    screen_rows: list[USScreenRow] = []
+                    for (record_json,) in records:
+                        record_value = json.loads(str(record_json))
+                        if not isinstance(record_value, Mapping):
+                            raise ValueError("screening result payload must be an object")
+                        record_payload = cast(Mapping[str, Any], record_value)
+                        screen_row_value = record_payload.get("screen_row")
+                        if not isinstance(screen_row_value, Mapping):
+                            raise ValueError("screening result row is missing")
+                        screen_row = cast(Mapping[str, Any], screen_row_value)
+                        screen_rows.append(USScreenRow.model_validate(screen_row))
+                    if not screen_rows:
+                        continue
+                    return USScreenCacheSnapshot(
+                        run_id=str(run_id_raw),
+                        refreshed_at=refreshed_at,
+                        rows=tuple(screen_rows),
+                        total_count=total_count,
+                        truncated=truncated,
+                        pages=pages,
+                    )
+                except (KeyError, TypeError, ValueError, json.JSONDecodeError):
+                    continue
+        return None
 
     def save_portfolio(self, portfolio: USPaperPortfolio) -> None:
         with self._connect() as db:

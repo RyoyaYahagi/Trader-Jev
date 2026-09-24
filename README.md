@@ -34,8 +34,7 @@ moomoo APIは市場データ取得に限って使用します。注文・口座�
 - Initial exit: ATR(14) × 1.0 stop、1.5R take-profit、最大保有15分
 - Initial Jev inputs: `TECHNICAL_ONLY` と `MICROSTRUCTURE`（ニュース／MLは初期Forward Paperでは未使用）
 - Autonomous Forward Paper: 新規runは1日2件、同時実行は最大2件
-- Initial Forward Paper universe: 固定10銘柄
-- Optional U.S. research profile: read-only全銘柄スクリーニング + Jev選別 + 10万円Paper portfolio ([docs/US_UNIVERSE_PAPER.md](docs/US_UNIVERSE_PAPER.md))
+- Nightly U.S. Paper: 全銘柄スクリーニング + Jev選別 + 10万円Paper portfolio。Jev候補判定は30秒ごと、全体スクリーナーは5分ごとに更新 ([docs/US_UNIVERSE_PAPER.md](docs/US_UNIVERSE_PAPER.md))
 - Markets: Japan / US を研究対象とする
 - Direction model: LONG / SHORT / HOLD
 - Execution: PaperBroker only

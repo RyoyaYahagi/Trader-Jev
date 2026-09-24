@@ -11,6 +11,7 @@ import pytest
 
 from trader_jev.clock import FixedClock
 from trader_jev.us_equity import (
+    USDecisionKind,
     USMarketSnapshot,
     USOHLCVBar,
     USPaperPortfolio,
@@ -21,7 +22,10 @@ from trader_jev.us_equity import (
 from trader_jev.us_moomoo import ScreenFetch, USMoomooError
 from trader_jev.us_paper_cli import (
     USPaperConfig,
+    USPaperRunSummary,
+    USPaperStepResult,
     USUniversePaperRunner,
+    build_parser,
     parse_jev_opinion,
 )
 
@@ -188,6 +192,150 @@ def test_scan_reuses_screen_results_but_refreshes_snapshots_every_step(tmp_path:
     assert not third.screen_cache_hit
 
 
+def test_new_runner_reuses_recently_persisted_screen_results(tmp_path: Path) -> None:
+    config = _config(tmp_path / "paper.sqlite3")
+    store = USUniversePaperStore(config.database_path)
+    clock = _MutableClock(NOW)
+    first_stats: dict[str, Any] = {}
+    first_runner = USUniversePaperRunner(
+        config,
+        store,
+        market_source_factory=lambda: _CountingMarketSource(first_stats),
+        clock=clock,
+    )
+    original_scan = first_runner.scan()
+
+    clock.advance(3600)
+    resumed_stats: dict[str, Any] = {}
+    resumed_runner = USUniversePaperRunner(
+        config,
+        store,
+        market_source_factory=lambda: _CountingMarketSource(resumed_stats),
+        clock=clock,
+    )
+    resumed_scan = resumed_runner.scan()
+
+    assert original_scan.screen_refreshed_at == NOW
+    assert resumed_scan.screen_cache_hit
+    assert resumed_scan.screen_refreshed_at == NOW
+    assert resumed_stats["screen_calls"] == 0
+    assert resumed_stats["snapshot_calls"] == 1
+
+
+def test_new_runner_discards_expired_persisted_screen_results(tmp_path: Path) -> None:
+    config = _config(tmp_path / "paper.sqlite3").model_copy(
+        update={"startup_screen_cache_max_age_seconds": 3600}
+    )
+    store = USUniversePaperStore(config.database_path)
+    clock = _MutableClock(NOW)
+    first_runner = USUniversePaperRunner(
+        config,
+        store,
+        market_source_factory=lambda: _CountingMarketSource({}),
+        clock=clock,
+    )
+    first_runner.scan()
+
+    clock.advance(3601)
+    refreshed_stats: dict[str, Any] = {}
+    refreshed_runner = USUniversePaperRunner(
+        config,
+        store,
+        market_source_factory=lambda: _CountingMarketSource(refreshed_stats),
+        clock=clock,
+    )
+    refreshed_scan = refreshed_runner.scan()
+
+    assert not refreshed_scan.screen_cache_hit
+    assert refreshed_stats["screen_calls"] == 1
+
+
+@pytest.mark.asyncio
+async def test_paper_run_stops_at_session_close_without_opening_market_source(
+    tmp_path: Path,
+) -> None:
+    closed_at = datetime(2026, 9, 24, 16, 0, tzinfo=ZoneInfo("America/New_York"))
+    runner = USUniversePaperRunner(
+        _config(tmp_path / "paper.sqlite3"),
+        USUniversePaperStore(tmp_path / "paper.sqlite3"),
+        market_source_factory=lambda: _UnexpectedMarketSource(),
+        clock=FixedClock(closed_at),
+    )
+
+    result = await runner.paper_run(steps=None, dry_run=False, until_market_close=True)
+
+    assert isinstance(result, USPaperRunSummary)
+    assert result.steps_completed == 0
+    assert result.stop_reason == "market_closed"
+
+
+@pytest.mark.asyncio
+async def test_paper_run_until_close_honors_optional_step_limit(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config = _config(tmp_path / "paper.sqlite3")
+    runner = USUniversePaperRunner(
+        config,
+        USUniversePaperStore(config.database_path),
+        market_source_factory=_market_factory,
+        clock=FixedClock(NOW),
+    )
+
+    async def paper_step_stub(
+        *,
+        dry_run: bool = False,
+        usd_jpy_rate: Decimal | None = None,
+        usd_jpy_as_of: str | None = None,
+        usd_jpy_source: str | None = None,
+    ) -> USPaperStepResult:
+        del dry_run, usd_jpy_rate, usd_jpy_as_of, usd_jpy_source
+        return USPaperStepResult(
+            run_id="test-run",
+            as_of=NOW,
+            dry_run=True,
+            status="NO_TRADE",
+            decision=USDecisionKind.NO_TRADE,
+            reason="test",
+        )
+
+    async def unexpected_sleep(_seconds: float) -> None:
+        pytest.fail("step-limited run should return without sleeping")
+
+    monkeypatch.setattr(runner, "paper_step", paper_step_stub)
+    result = await runner.paper_run(
+        steps=1,
+        dry_run=True,
+        until_market_close=True,
+        sleep=unexpected_sleep,
+    )
+
+    assert isinstance(result, USPaperRunSummary)
+    assert result.steps_completed == 1
+    assert result.last_run_id == "test-run"
+    assert result.stop_reason == "step_limit"
+
+
+def test_paper_run_parser_accepts_nightly_session_options() -> None:
+    args = build_parser().parse_args(
+        [
+            "paper-run",
+            "--until-market-close",
+            "--usd-jpy",
+            "157.92",
+            "--usd-jpy-as-of",
+            "2026-09-24T10:13:47+09:00",
+            "--usd-jpy-source",
+            "Investing.com USD/JPY real-time quote",
+        ]
+    )
+
+    assert args.until_market_close
+    assert args.usd_jpy == Decimal("157.92")
+    assert args.usd_jpy_as_of == "2026-09-24T10:13:47+09:00"
+    assert args.usd_jpy_source == "Investing.com USD/JPY real-time quote"
+
+
 def test_failed_screen_refresh_uses_last_successful_cache_without_retry_storm(
     tmp_path: Path,
 ) -> None:
@@ -262,6 +410,7 @@ async def test_paper_run_keeps_one_market_context_open_across_steps(tmp_path: Pa
 
     results = await runner.paper_run(steps=2, dry_run=True, sleep=no_sleep)
 
+    assert not isinstance(results, USPaperRunSummary)
     assert len(results) == 2
     assert jev.calls == 2
     assert stats["created"] == 1

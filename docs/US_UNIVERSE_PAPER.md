@@ -1,6 +1,6 @@
 # 米国株ユニバースのPaper運用
 
-`trader-jev` は、moomoo OpenDの読み取り専用Quote APIから米国株の銘柄情報とスクリーナー結果を取り込み、候補の選定、Jev判断、RiskEngine、PaperBrokerの順に処理します。既存の固定10銘柄Forward Paperとは別の研究プロファイルです。
+`trader-jev` は、moomoo OpenDの読み取り専用Quote APIから米国株の銘柄情報とスクリーナー結果を取り込み、候補の選定、Jev判断、RiskEngine、PaperBrokerの順に処理します。夜間の定期実行はこの方式を使います。従来の固定10銘柄Forward Paperも比較実験や手動実行用に残します。
 
 moomooのQuoteContextだけを使います。取引、口座、注文、実ポジションのAPIは呼び出しません。実注文機能もありません。
 
@@ -18,7 +18,7 @@ moomooのQuoteContextだけを使います。取引、口座、注文、実ポ�
 - 米国東部時間の通常取引時間だけ注文候補を評価する。週末、米国休場日、早引けを`NasdaqCalendar`で扱う。
 - 初期損切り2%、利確3%、最大保有15分。Paper約定費用はmoomoo US Basic、スリッページ10 bps。
 
-米ドル円レートは口座APIや外部フィードから自動取得しません。`usd_jpy_rate`、`fx_as_of`、`fx_source`を設定して、使用したレートと出典を台帳へ保存します。コマンドラインでレートを上書きした場合は実行時刻とoverride元を記録し、設定値がない場合は既存ポートフォリオのレートと元の取得時刻・出典を引き継ぎます。レートを指定せず既存ポートフォリオもない場合、`paper-step`はNO TRADEで終了します。
+米ドル円レートは口座APIや外部フィードから自動取得しません。`usd_jpy_rate`、`fx_as_of`、`fx_source`を設定して、使用したレートと出典を台帳へ保存します。コマンドラインでレートを上書きした場合は、`--usd-jpy-as-of`と`--usd-jpy-source`が指定されていればその時刻・出典を記録し、省略時は実行時刻と`command-line override`を記録します。設定値がない場合は既存ポートフォリオのレートと元の取得時刻・出典を引き継ぎます。レートを指定せず既存ポートフォリオもない場合、`paper-step`はNO TRADEで終了します。
 
 ## 実行
 
@@ -30,13 +30,14 @@ uv run trader-jev --config configs/us-equity-paper.yaml scan
 uv run trader-jev --config configs/us-equity-paper.yaml decide
 uv run trader-jev --config configs/us-equity-paper.yaml paper-step --dry-run --usd-jpy 150
 uv run trader-jev --config configs/us-equity-paper.yaml paper-run --steps 10 --dry-run --usd-jpy 150
+uv run trader-jev --config configs/us-equity-paper.yaml paper-run --until-market-close --usd-jpy 150 --usd-jpy-as-of 2026-09-24T13:00:00-04:00 --usd-jpy-source 'manual rate sheet'
 uv run trader-jev --config configs/us-equity-paper.yaml portfolio
 uv run trader-jev --config configs/us-equity-paper.yaml history-quota
 ```
 
-`decide`とPaperコマンドでは既存の`.env`または環境変数のJev Gateway設定を使います。`paper-step --dry-run`はPaperBrokerの仮想約定まで計算しますが、ポートフォリオ状態は更新しません。監査記録、スクリーニング結果、特徴量、Jev入出力、仮想注文・約定候補はSQLiteへ保存します。
+`decide`とPaperコマンドでは既存の`.env`または環境変数のJev Gateway設定を使います。`--usd-jpy-as-of`と`--usd-jpy-source`で上書きレートの時刻と出典を指定できます。`paper-step --dry-run`はPaperBrokerの仮想約定まで計算しますが、ポートフォリオ状態は更新しません。監査記録、スクリーニング結果、特徴量、Jev入出力、仮想注文・約定候補はSQLiteへ保存します。
 
-`paper-run`は`--steps`を省略すると停止まで繰り返し、`decision_interval_seconds`ごとに次のステップへ進みます。1回の実行中はmoomoo OpenDのQuoteContextを維持し、各ステップで価格snapshotを取得します。候補順位は新しいsnapshotを使って毎回再計算します。市場全体のスクリーナー結果だけは`screen_refresh_interval_seconds`が経過するまで再利用します。1分足は保存時刻から`minute_bar_refresh_interval_seconds`が経過してから再取得し、それまではキャッシュを使います。スキャン結果にはスクリーナーキャッシュの利用有無と、最後に取得した時刻を記録します。最初の実行前に`--dry-run`で接続、入力、判定、仮想約定を確認してください。
+`paper-run`は`--steps`を省略すると停止まで繰り返し、`decision_interval_seconds`ごとに次のステップへ進みます。`--until-market-close`を指定すると、通常取引時間が終わった時点で終了します。1回の実行中はmoomoo OpenDのQuoteContextを維持し、各ステップで価格snapshotを取得します。候補順位は新しいsnapshotを使って毎回再計算します。市場全体のスクリーナー結果だけは`screen_refresh_interval_seconds`が経過するまで再利用します。起動時にSQLite内に24時間以内の成功済みスクリーナー結果があれば、最初のステップでその結果を使います。保存結果がないか期限切れなら初回に取得し、その後は通常の更新間隔に従います。1分足は保存時刻から`minute_bar_refresh_interval_seconds`が経過してから再取得し、それまではキャッシュを使います。スキャン結果にはスクリーナーキャッシュの利用有無と、最後に取得した時刻を記録します。最初の実行前に`--dry-run`で接続、入力、判定、仮想約定を確認してください。
 
 スクリーナー更新に失敗したときは、5分間は再試行しません。直近の成功結果があればそのキャッシュを使い、成功結果がまだなければそのステップでは候補を作りません。
 

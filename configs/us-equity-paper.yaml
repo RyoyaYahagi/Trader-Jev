@@ -3,7 +3,7 @@
 database_path: data/us_equity_paper.sqlite3
 include_etf: false
 include_otc: false
-universe_refresh_days: 1
+universe_refresh_days: 7
 
 min_price_usd: 3
 min_market_cap_usd: 300000000

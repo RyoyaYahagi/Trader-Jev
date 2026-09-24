@@ -57,17 +57,28 @@ modify any order.
   --report-dir /home/yappa/.local/state/trader-jev/paper
 ```
 
-Open `http://127.0.0.1:8765/` in a browser. The page shows the latest report,
-portfolio equity and PnL, residual positions and orders, execution counters,
-and the virtual fill history. Separate selectors choose the session start date,
-capital constraint, and decision mode. The latest matching report is selected
-when more than one report has the same combination.
+Open `http://127.0.0.1:8765/` in a browser. The page shows net PnL, return,
+equity, drawdown, closed trades, and fees first. It then compares the newest
+valid `RULE` and `JEV` reports for the selected start date and exact capital
+condition. The condition match includes initial capital, the capital limit, and
+JPY capital when present. The overview needs only start-date and capital
+selectors; if one branch is missing, the page displays an empty state for it.
+Net PnL and return include current unrealized PnL; trade win rate, average trade,
+gross profit/loss, profit factor, and the chart use closed trades with net PnL
+after fees. Gross profit and loss are the sums of winning and losing trade net
+PnL respectively, matching the existing observability definitions.
+Positions, decision and execution counts, recent trades, and the cumulative
+realized net PnL chart follow. The Jev usage summary is compact, with daily,
+weekly, and monthly details available on expansion. The complete fill history
+also remains available on expansion.
 The page refreshes the report index every 15 seconds; a running Forward Paper
 session becomes visible after it writes its session report.
 
 The JSON read endpoints are `/api/reports`, `/api/latest`, and
-`/api/report?name=<report-file-name>`. `/api/costs` returns Jev usage and cost
-aggregates for the latest usage day, Monday-to-Sunday week, and calendar month.
+`/api/report?name=<report-file-name>`. `/api/compare?date=<date>&capital_key=<key>`
+returns the newest valid `RULE` and `JEV` report for one matching condition, or
+`null` for a missing branch. `/api/costs` returns Jev usage and cost aggregates
+for the latest usage day, Monday-to-Sunday week, and calendar month.
 The server binds to `127.0.0.1` by default so the report is not exposed to the
 network.
 
@@ -114,9 +125,10 @@ Run the three default capital conditions with both decision branches using:
 
 The command writes six
 `forward-paper-<timestamp>-<capital>-<mode>.json` reports. The dashboard's
-date, capital-constraint, and decision-mode selectors switch among these
-reports. Each branch has an independent Paper ledger and RiskEngine; only the
-normalized read-only quote stream is shared. All reports remain Paper-only.
+start-date and capital-condition selectors automatically compare the latest
+matching `RULE` and `JEV` reports. Each branch has an independent Paper ledger
+and RiskEngine; only the normalized read-only quote stream is shared. All
+reports remain Paper-only.
 
 ## Jev usage cost
 

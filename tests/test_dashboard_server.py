@@ -1,23 +1,27 @@
 from __future__ import annotations
 
 import json
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
 from threading import Thread
+from urllib.parse import urlencode
 from urllib.request import urlopen
 from uuid import uuid4
 
 import pytest
 
 from trader_jev.dashboard_server import (
+    DASHBOARD_HTML,
     ReportStore,
     create_server,
     dashboard_payload,
+    performance_summary,
 )
 from trader_jev.forward_paper import ForwardPaperSummary, build_us_instruments
 from trader_jev.jev_usage import JevUsageRecord, summarize_usage
-from trader_jev.models import Action, FillEvent, PortfolioState
+from trader_jev.models import Action, ExecutionMode, FillEvent, PortfolioState, RiskProfile
+from trader_jev.observability import TradeRecord
 
 NOW = datetime(2026, 9, 22, 13, 30, tzinfo=UTC)
 
@@ -61,6 +65,68 @@ def make_summary() -> ForwardPaperSummary:
     )
 
 
+def make_trade(net_pnl: Decimal, minute: int, *, closed: bool = True) -> TradeRecord:
+    instrument = build_us_instruments(("AAPL",))[0]
+    entry_time = NOW + timedelta(minutes=minute)
+    return TradeRecord(
+        trade_id=f"trade-{minute}-{net_pnl}",
+        timestamp=entry_time,
+        exit_timestamp=entry_time + timedelta(seconds=90) if closed else None,
+        market=instrument.market,
+        symbol=instrument.symbol,
+        side=Action.LONG,
+        entry_price=Decimal("100"),
+        exit_price=Decimal("101") if closed else None,
+        quantity=1,
+        gross_pnl=net_pnl,
+        fees=Decimal("0"),
+        net_pnl=net_pnl,
+        holding_duration_seconds=90 if closed else None,
+        portfolio_id="forward-paper-us",
+        risk_profile=RiskProfile.BALANCED,
+        order_type="MARKET",
+        execution_mode=ExecutionMode.PAPER,
+        entry_order_id=uuid4(),
+        entry_fill_id=uuid4(),
+        exit_fill_ids=(uuid4(),) if closed else (),
+        closed=closed,
+        win=net_pnl > 0 if closed else None,
+    )
+
+
+def write_named_report(directory: Path, name: str, summary: ForwardPaperSummary) -> str:
+    path = directory / name
+    path.write_text(
+        json.dumps(summary.model_dump(mode="json"), ensure_ascii=False), encoding="utf-8"
+    )
+    return path.name
+
+
+def make_branch_summary(
+    mode: str,
+    *,
+    initial_capital: Decimal = Decimal("10000"),
+    capital_constraint: str = "634.96",
+    jpy_capital: str = "100000",
+    status: str = "COMPLETED",
+) -> ForwardPaperSummary:
+    base = make_summary()
+    return base.model_copy(
+        update={
+            "status": status,
+            "portfolio": base.portfolio.model_copy(update={"initial_capital": initial_capital}),
+            "run_config": {
+                "execution_mode": "PAPER",
+                "scenario_id": f"jpy-100k-{mode.lower()}",
+                "scenario_label": "10万制約",
+                "jpy_capital": jpy_capital,
+                "capital_constraint": capital_constraint,
+                "decision_mode": mode,
+            },
+        }
+    )
+
+
 def write_report(tmp_path: Path) -> str:
     path = tmp_path / "forward-paper-test.json"
     path.write_text(
@@ -98,6 +164,22 @@ def test_report_store_loads_latest_and_dashboard_payload(tmp_path: Path) -> None
         }
     ]
     assert payload["fill_events"][0]["quantity"] == 10
+    assert payload["performance"]["closed_trade_count"] == 0
+    assert payload["performance"]["cumulative_realized_net_pnl"] == []
+
+
+def test_dashboard_payload_falls_back_to_portfolio_fees_without_fill_events() -> None:
+    base = make_summary()
+    summary = base.model_copy(
+        update={
+            "fill_events": (),
+            "portfolio": base.portfolio.model_copy(update={"total_fees": Decimal("3.75")}),
+        }
+    )
+
+    payload = dashboard_payload("forward-paper-legacy.json", summary)
+
+    assert payload["pnl"]["fees"] == "3.75"
 
 
 def test_dashboard_payload_exposes_jpy_conversion_and_decision_branch() -> None:
@@ -139,6 +221,217 @@ def test_report_store_rejects_path_traversal(tmp_path: Path) -> None:
 
     with pytest.raises(RuntimeError, match="invalid report name"):
         store.load("../forward-paper-test.json")
+
+
+def test_performance_summary_uses_closed_net_trades_and_cumulative_order() -> None:
+    trades = (
+        make_trade(Decimal("10"), 1),
+        make_trade(Decimal("-4"), 2),
+        make_trade(Decimal("99"), 3, closed=False),
+    )
+
+    performance = performance_summary(trades, initial_capital=Decimal("100"))
+
+    assert performance["closed_trade_count"] == 2
+    assert performance["win_rate"] == "0.5"
+    assert performance["average_net_pnl_per_trade"] == "3"
+    assert performance["gross_profit"] == "10"
+    assert performance["gross_loss"] == "4"
+    assert performance["profit_factor"] == "2.5"
+    assert performance["return_pct"] == "0.06"
+    assert [
+        point["cumulative_net_pnl"] for point in performance["cumulative_realized_net_pnl"]
+    ] == [
+        "10",
+        "6",
+    ]
+
+
+def test_performance_summary_handles_zero_trades_and_open_positions() -> None:
+    performance = performance_summary(
+        (make_trade(Decimal("5"), 1, closed=False),), initial_capital=Decimal("100")
+    )
+
+    assert performance["closed_trade_count"] == 0
+    assert performance["win_rate"] is None
+    assert performance["average_net_pnl_per_trade"] is None
+    assert performance["profit_factor"] is None
+    assert performance["cumulative_realized_net_pnl"] == []
+
+
+def test_performance_summary_handles_all_wins() -> None:
+    performance = performance_summary(
+        (make_trade(Decimal("2"), 1), make_trade(Decimal("3"), 2)),
+        initial_capital=Decimal("100"),
+    )
+
+    assert performance["win_rate"] == "1"
+    assert performance["gross_profit"] == "5"
+    assert performance["gross_loss"] == "0"
+    assert performance["profit_factor"] is None
+
+
+def test_performance_summary_handles_all_losses() -> None:
+    performance = performance_summary(
+        (make_trade(Decimal("-2"), 1), make_trade(Decimal("-3"), 2)),
+        initial_capital=Decimal("100"),
+    )
+
+    assert performance["win_rate"] == "0"
+    assert performance["gross_profit"] == "0"
+    assert performance["gross_loss"] == "5"
+    assert performance["profit_factor"] == "0"
+
+
+def test_dashboard_payload_return_includes_current_portfolio_pnl() -> None:
+    base = make_summary()
+    summary = base.model_copy(
+        update={
+            "portfolio": base.portfolio.model_copy(
+                update={
+                    "initial_capital": Decimal("1000"),
+                    "daily_pnl": Decimal("125"),
+                }
+            )
+        }
+    )
+
+    performance = dashboard_payload("forward-paper-test.json", summary)["performance"]
+
+    assert performance["portfolio_net_pnl"] == "125"
+    assert performance["portfolio_return_pct"] == "0.125"
+
+
+@pytest.mark.parametrize(("mode", "expected_key"), (("RULE", "rule"), ("JEV", "jev")))
+def test_comparison_pair_handles_one_available_branch(
+    tmp_path: Path, mode: str, expected_key: str
+) -> None:
+    write_named_report(tmp_path, f"forward-paper-{mode.lower()}.json", make_branch_summary(mode))
+    store = ReportStore(tmp_path)
+    entry = store.index()[0]
+
+    pair = store.comparison_pair(entry["session_date"], entry["capital_key"])
+
+    assert pair[expected_key] is not None
+    other_key = "jev" if expected_key == "rule" else "rule"
+    assert pair[other_key] is None
+
+
+def test_comparison_pair_requires_matching_capital_and_ignores_invalid_reports(
+    tmp_path: Path,
+) -> None:
+    write_named_report(tmp_path, "forward-paper-rule.json", make_branch_summary("RULE"))
+    write_named_report(
+        tmp_path,
+        "forward-paper-jev-different-capital.json",
+        make_branch_summary("JEV", initial_capital=Decimal("20000")),
+    )
+    (tmp_path / "forward-paper-jev-invalid.json").write_text("{", encoding="utf-8")
+    store = ReportStore(tmp_path)
+    rule_entry = next(
+        entry
+        for entry in store.index()
+        if entry.get("status") != "INVALID" and entry["decision_mode"] == "RULE"
+    )
+
+    pair = store.comparison_pair(rule_entry["session_date"], rule_entry["capital_key"])
+
+    assert pair["rule"]["report_name"] == "forward-paper-rule.json"
+    assert pair["jev"] is None
+    assert any(entry["status"] == "INVALID" for entry in store.index())
+
+
+@pytest.mark.parametrize(
+    ("capital_constraint", "jpy_capital"),
+    (("300", "100000"), ("634.96", "500000")),
+)
+def test_comparison_pair_does_not_match_a_different_capital_limit_or_jpy_amount(
+    tmp_path: Path, capital_constraint: str, jpy_capital: str
+) -> None:
+    write_named_report(tmp_path, "forward-paper-rule.json", make_branch_summary("RULE"))
+    write_named_report(
+        tmp_path,
+        "forward-paper-jev.json",
+        make_branch_summary(
+            "JEV",
+            capital_constraint=capital_constraint,
+            jpy_capital=jpy_capital,
+        ),
+    )
+    store = ReportStore(tmp_path)
+    rule_entry = next(entry for entry in store.index() if entry["decision_mode"] == "RULE")
+
+    pair = store.comparison_pair(rule_entry["session_date"], rule_entry["capital_key"])
+
+    assert pair["rule"] is not None
+    assert pair["jev"] is None
+
+
+def test_comparison_pair_returns_latest_rule_and_jev_for_same_condition(
+    tmp_path: Path,
+) -> None:
+    write_named_report(tmp_path, "forward-paper-rule-old.json", make_branch_summary("RULE"))
+    newest = make_branch_summary("RULE").model_copy(
+        update={"started_at": NOW + timedelta(minutes=5), "finished_at": NOW + timedelta(minutes=5)}
+    )
+    write_named_report(tmp_path, "forward-paper-rule-new.json", newest)
+    write_named_report(tmp_path, "forward-paper-jev.json", make_branch_summary("JEV"))
+    store = ReportStore(tmp_path)
+    entry = next(entry for entry in store.index() if entry["decision_mode"] == "RULE")
+
+    pair = store.comparison_pair(entry["session_date"], entry["capital_key"])
+
+    assert pair["rule"]["report_name"] == "forward-paper-rule-new.json"
+    assert pair["jev"]["report_name"] == "forward-paper-jev.json"
+
+
+def test_dashboard_payload_redacts_credentials_without_hiding_usage_counts() -> None:
+    record = JevUsageRecord(
+        occurred_at=NOW,
+        request_id="request-1",
+        success=True,
+        input_tokens=12,
+        output_tokens=3,
+        total_tokens=15,
+    )
+    summary = make_summary().model_copy(
+        update={
+            "jev_usage": summarize_usage((record,)),
+            "run_config": {
+                "execution_mode": "PAPER",
+                "gateway_api_key": "do-not-show",
+                "provider_response": {"access_token": "also-do-not-show", "ok": True},
+                "jev_pricing": {
+                    "input_usd_per_1k_tokens": "0.000042",
+                    "output_usd_per_1k_tokens": "0",
+                    "currency": "USD",
+                    "api_key": "never-show",
+                },
+            },
+        }
+    )
+
+    payload = dashboard_payload("forward-paper-test.json", summary)
+
+    assert payload["run_config"]["gateway_api_key"] == "[REDACTED]"
+    assert payload["run_config"]["provider_response"]["access_token"] == "[REDACTED]"
+    assert payload["run_config"]["jev_pricing"] == {
+        "input_usd_per_1k_tokens": "0.000042",
+        "output_usd_per_1k_tokens": "0",
+        "currency": "USD",
+    }
+    assert payload["jev_usage"]["input_tokens"] == 12
+    assert "do-not-show" not in json.dumps(payload)
+    assert "also-do-not-show" not in json.dumps(payload)
+    assert "never-show" not in json.dumps(payload)
+
+
+def test_dashboard_html_has_overview_sections_without_top_level_mode_selector() -> None:
+    assert 'id="rule-jev-comparison"' in DASHBOARD_HTML
+    assert 'id="pnl-chart"' in DASHBOARD_HTML
+    assert 'id="decision-funnel"' in DASHBOARD_HTML
+    assert 'id="recent-trades"' in DASHBOARD_HTML
+    assert 'id="mode-select"' not in DASHBOARD_HTML
 
 
 def test_report_store_aggregates_jev_cost_by_period(tmp_path: Path) -> None:
@@ -189,10 +482,18 @@ def test_dashboard_http_endpoints_are_read_only(tmp_path: Path) -> None:
         base = f"http://127.0.0.1:{server.server_port}"
         with urlopen(f"{base}/healthz", timeout=2) as response:
             assert json.loads(response.read()) == {"status": "ok"}
+            assert response.headers["Cache-Control"] == "no-store"
         with urlopen(f"{base}/api/latest", timeout=2) as response:
             payload = json.loads(response.read())
             assert payload["report_name"] == "forward-paper-test.json"
             assert payload["run_config"]["execution_mode"] == "PAPER"
+        entry = ReportStore(tmp_path).index()[0]
+        query = urlencode({"date": entry["session_date"], "capital_key": entry["capital_key"]})
+        with urlopen(f"{base}/api/compare?{query}", timeout=2) as response:
+            pair = json.loads(response.read())
+            assert pair["rule"]["report_name"] == "forward-paper-test.json"
+            assert pair["jev"] is None
+            assert response.headers["Cache-Control"] == "no-store"
     finally:
         server.shutdown()
         thread.join(timeout=2)

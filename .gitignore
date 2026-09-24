@@ -11,3 +11,5 @@ htmlcov/
 .env.*
 !.env.example
 data/us_equity_paper.sqlite3*
+jev-sdk/node_modules/
+jev-sdk/dist/

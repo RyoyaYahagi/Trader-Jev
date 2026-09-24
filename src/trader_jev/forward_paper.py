@@ -421,11 +421,7 @@ class ForwardPaperRunner:
         if self.config.decision_mode is ForwardDecisionMode.JEV:
             client = jev_client or JevHttpClient.from_env()
             self._jev_transport = (
-                "gateway"
-                if isinstance(client, JevHttpClient) and client.config.gateway_url is not None
-                else "direct"
-                if isinstance(client, JevHttpClient)
-                else "custom"
+                "vercel_ai_gateway_typesafe_sdk" if isinstance(client, JevHttpClient) else "custom"
             )
             self._jev_adapter = JevDecisionAdapter(
                 client,
@@ -586,9 +582,7 @@ class ForwardPaperRunner:
                     str(self.config.jpy_capital) if self.config.jpy_capital is not None else None
                 ),
                 "usd_jpy_rate": (
-                    str(self.config.usd_jpy_rate)
-                    if self.config.usd_jpy_rate is not None
-                    else None
+                    str(self.config.usd_jpy_rate) if self.config.usd_jpy_rate is not None else None
                 ),
                 "fx_as_of": self.config.fx_as_of,
                 "fx_source": self.config.fx_source,
@@ -698,9 +692,10 @@ class ForwardPaperRunner:
 
     def _decision_due(self, key: str, now: datetime) -> bool:
         previous = self._last_decision_at.get(key)
-        return previous is None or (
-            now - previous
-        ).total_seconds() >= self.config.decision_cadence_seconds
+        return (
+            previous is None
+            or (now - previous).total_seconds() >= self.config.decision_cadence_seconds
+        )
 
     async def _close_open_positions(self) -> None:
         for symbol, quantity in tuple(self.ledger.state.positions.items()):
@@ -808,9 +803,7 @@ class ParallelForwardPaperRunner:
                 await asyncio.gather(
                     *(runner.process_event(raw_event, now) for runner in self.runners)
                 )
-                processed = processed or any(
-                    runner.events_processed > 0 for runner in self.runners
-                )
+                processed = processed or any(runner.events_processed > 0 for runner in self.runners)
         except asyncio.CancelledError:
             status = "CANCELED"
             raise
@@ -944,8 +937,7 @@ def build_parser() -> argparse.ArgumentParser:
         type=Path,
         default=Path(".env"),
         help=(
-            "Optional JEV env file; process environment variables take precedence "
-            "(default: .env)."
+            "Optional JEV env file; process environment variables take precedence (default: .env)."
         ),
     )
     parser.add_argument(

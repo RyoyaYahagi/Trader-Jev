@@ -132,7 +132,7 @@ YAMLの `schedule` に段階、運用候補の順番、比較するケースの�
 
 日次上限は `started_at` がその予算日に初めて設定されたrun行を数えます。再試行は同じrun行のattempt追加なので新規枠を消費しません。150 runを一巡する最短目安は、失敗・休場を除き75取引日です。この日数は実行件数から求めた下限であり、統計的な十分性や過学習の抑制を保証しません。
 
-実行前に、[moomoo OpenD設定](MOOMOO.md)を起動し、[Jev Gatewayまたは直接API設定](JEV_HTTP.md)を用意します。`.env` はworkerの `--env-file`（既定 `.env`）から読み込まれ、`MOOMOO_OPEND_*`とGateway接続用の`JEV_*`をプロセスへ渡します。systemd Credential運用では上流Jev APIキーを`.env`へ置きません。`uv sync`後は `trader-jev-experiment-worker` がconsole scriptとして利用できます。OpenDは読み取り専用quote、JevはGatewayまたはAPIキー経由で使用し、実注文・口座APIは呼び出しません。
+実行前に、[moomoo OpenD設定](MOOMOO.md)を起動し、[TypeSafe公式SDKとVercel AI Gatewayの設定](JEV_HTTP.md)を用意します。`.env`はworkerの`--env-file`（既定`.env`）から読み込まれ、`MOOMOO_OPEND_*`、`AI_GATEWAY_API_KEY`、Jev実験設定をプロセスへ渡します。Jev APIキーはサーバー側の環境にだけ置きます。`uv sync`後は`trader-jev-experiment-worker`がconsole scriptとして利用できます。OpenDは読み取り専用quote、JevはVercel AI Gateway経由で使用し、実注文・口座APIは呼び出しません。
 
 登録と自動実行:
 

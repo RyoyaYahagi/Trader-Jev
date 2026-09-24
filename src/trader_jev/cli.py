@@ -95,9 +95,8 @@ def build_parser() -> argparse.ArgumentParser:
         type=Path,
         default=Path(".env"),
         help=(
-            "Optional JEV_*/JQUANTS_*/TYPESAFE_API_KEY env file; process environment variables "
-            "take precedence "
-            "(default: .env)."
+            "Optional JEV_*/JQUANTS_*/MOOMOO_*/AI_GATEWAY_API_KEY/VERCEL_OIDC_TOKEN env file; "
+            "process environment takes precedence (default: .env)."
         ),
     )
     source = parser.add_mutually_exclusive_group(required=True)
@@ -472,9 +471,21 @@ def _book_market_state(event: OrderBookEvent) -> MarketState:
 
 
 def load_env_file(path: Path) -> dict[str, str]:
-    """Load allowed KEY=VALUE entries and drop unused upstream keys for Gateway use."""
+    """Load project KEY=VALUE settings while excluding retired Jev credentials."""
 
     values = dict(os.environ)
+    retired_names = {
+        "JEV_API_KEY",
+        "JEV_BASE_URL",
+        "JEV_ENDPOINT_PATH",
+        "JEV_GATEWAY_TOKEN",
+        "JEV_GATEWAY_URL",
+        "JEV_API_KEY_HEADER",
+        "JEV_API_KEY_SCHEME",
+        "TYPESAFE_API_KEY",
+    }
+    for name in retired_names:
+        values.pop(name, None)
     if path.exists() and not path.is_file():
         raise ValueError(f"env file is not a file: {path}")
     if path.exists():
@@ -490,15 +501,16 @@ def load_env_file(path: Path) -> dict[str, str]:
                 raise ValueError(f"env file line {line_number} must use KEY=VALUE")
             name, raw_value = line.split("=", 1)
             name = name.strip()
-            if not name.startswith(("JEV_", "JQUANTS_", "MOOMOO_")) and name != "TYPESAFE_API_KEY":
+            if name in retired_names:
+                continue
+            if not name.startswith(("JEV_", "JQUANTS_", "MOOMOO_")) and name not in {
+                "AI_GATEWAY_API_KEY",
+                "VERCEL_OIDC_TOKEN",
+            }:
                 continue
             value = _parse_env_value(raw_value.strip(), line_number)
             values.setdefault(name, value)
 
-    gateway_setting = values.get("JEV_GATEWAY_URL")
-    if gateway_setting is None or gateway_setting.strip():
-        values.pop("JEV_API_KEY", None)
-        values.pop("TYPESAFE_API_KEY", None)
     return values
 
 

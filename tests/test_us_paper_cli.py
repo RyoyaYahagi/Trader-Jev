@@ -43,6 +43,15 @@ def test_noul_does_not_fabricate_confidence() -> None:
     assert raw_trade_worthy["confidence"] == 0.01
 
 
+def test_jev_rejects_legacy_boolean_probability_shape() -> None:
+    response = _jev_response()
+    answers = response["answers"]
+    answers["trade_worthy"] = {"type": "boolean", "probability": 0.9}
+
+    with pytest.raises(ValueError, match="no Noul probability"):
+        parse_jev_opinion(response)
+
+
 @pytest.mark.asyncio
 async def test_dry_run_simulates_through_paper_broker_without_saving_positions(
     tmp_path: Path,

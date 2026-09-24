@@ -53,7 +53,7 @@ moomoo APIは市場データ取得に限って使用します。注文・口座�
 3. [TRADING_ASSUMPTIONS.md](docs/TRADING_ASSUMPTIONS.md)
 4. [TEST_GATES.md](docs/TEST_GATES.md)
 5. [AGENT_GUIDE.md](docs/AGENT_GUIDE.md)
-6. [JEV_HTTP.md](docs/JEV_HTTP.md)（実Jev HTTP接続を使う場合）
+6. [JEV_HTTP.md](docs/JEV_HTTP.md)（TypeSafe公式SDKとVercel AI Gatewayの設定）
 7. [ML.md](docs/ML.md)（ML学習・LightGBM・Paper利用）
 8. [JQUANTS.md](docs/JQUANTS.md)（J-Quants過去データ取得）
 9. [MOOMOO.md](docs/MOOMOO.md)（OpenDからの読み取り専用リアルタイム株価取得）

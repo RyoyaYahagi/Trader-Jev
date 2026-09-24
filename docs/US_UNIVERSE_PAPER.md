@@ -35,7 +35,7 @@ uv run trader-jev --config configs/us-equity-paper.yaml portfolio
 uv run trader-jev --config configs/us-equity-paper.yaml history-quota
 ```
 
-`decide`とPaperコマンドでは既存の`.env`または環境変数のJev Gateway設定を使います。`--usd-jpy-as-of`と`--usd-jpy-source`で上書きレートの時刻と出典を指定できます。`paper-step --dry-run`はPaperBrokerの仮想約定まで計算しますが、ポートフォリオ状態は更新しません。監査記録、スクリーニング結果、特徴量、Jev入出力、仮想注文・約定候補はSQLiteへ保存します。
+`decide`とPaperコマンドでは[接続手順](JEV_HTTP.md)に従って`.env`または環境変数の`AI_GATEWAY_API_KEY`を設定し、TypeSafe公式SDKからVercel AI Gatewayへ接続します。`--usd-jpy-as-of`と`--usd-jpy-source`で上書きレートの時刻と出典を指定できます。`paper-step --dry-run`はPaperBrokerの仮想約定まで計算しますが、ポートフォリオ状態は更新しません。監査記録、スクリーニング結果、特徴量、Jevのネイティブ入出力、仮想注文・約定候補はSQLiteへ保存します。
 
 `paper-run`は`--steps`を省略すると停止まで繰り返し、`decision_interval_seconds`ごとに次のステップへ進みます。`--until-market-close`を指定すると、通常取引時間が終わった時点で終了します。1回の実行中はmoomoo OpenDのQuoteContextを維持し、各ステップで価格snapshotを取得します。候補順位は新しいsnapshotを使って毎回再計算します。市場全体のスクリーナー結果だけは`screen_refresh_interval_seconds`が経過するまで再利用します。起動時にSQLite内に24時間以内の成功済みスクリーナー結果があれば、最初のステップでその結果を使います。保存結果がないか期限切れなら初回に取得し、その後は通常の更新間隔に従います。1分足は保存時刻から`minute_bar_refresh_interval_seconds`が経過してから再取得し、それまではキャッシュを使います。スキャン結果にはスクリーナーキャッシュの利用有無と、最後に取得した時刻を記録します。最初の実行前に`--dry-run`で接続、入力、判定、仮想約定を確認してください。
 

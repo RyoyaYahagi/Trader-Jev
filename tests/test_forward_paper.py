@@ -8,8 +8,8 @@ import pytest
 
 from trader_jev.clock import FixedClock
 from trader_jev.forward_paper import (
-    CapitalScenario,
     DEFAULT_CAPITAL_SCENARIOS,
+    CapitalScenario,
     ForwardDecisionMode,
     ForwardPaperConfig,
     ForwardPaperRunner,

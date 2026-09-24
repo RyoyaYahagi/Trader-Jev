@@ -52,29 +52,33 @@ async def test_synthetic_paper_cli_runs_full_jev_risk_broker_path(tmp_path: Path
     assert summary.run_config["fee_schedule"] == "AUTO"
 
 
-def test_env_file_does_not_override_process_environment(
+def test_env_file_loads_gateway_credential_without_overriding_process_environment(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     env_file = tmp_path / ".env"
     env_file.write_text(
-        "JEV_GATEWAY_URL=\nJEV_API_KEY=file-key\nTYPESAFE_API_KEY=typesafe-file-key\n"
-        "JEV_BASE_URL=https://file.example\nJQUANTS_API_KEY=jquants-file-key\n"
+        "AI_GATEWAY_API_KEY=file-gateway-key\nVERCEL_OIDC_TOKEN=file-oidc-token\n"
+        "JEV_API_KEY=legacy-direct-key\nTYPESAFE_API_KEY=legacy-typesafe-key\n"
+        "JEV_MODEL=jev-preview\nJQUANTS_API_KEY=jquants-file-key\n"
         "MOOMOO_OPEND_HOST=opend.example\nMOOMOO_OPEND_PORT=12345\n",
         encoding="utf-8",
     )
-    monkeypatch.setenv("JEV_API_KEY", "process-key")
+    monkeypatch.setenv("AI_GATEWAY_API_KEY", "process-gateway-key")
+    monkeypatch.delenv("VERCEL_OIDC_TOKEN", raising=False)
 
     values = load_env_file(env_file)
 
-    assert values["JEV_API_KEY"] == "process-key"
-    assert values["TYPESAFE_API_KEY"] == "typesafe-file-key"
-    assert values["JEV_BASE_URL"] == "https://file.example"
+    assert values["AI_GATEWAY_API_KEY"] == "process-gateway-key"
+    assert values["VERCEL_OIDC_TOKEN"] == "file-oidc-token"
+    assert values["JEV_MODEL"] == "jev-preview"
+    assert "JEV_API_KEY" not in values
+    assert "TYPESAFE_API_KEY" not in values
     assert values["JQUANTS_API_KEY"] == "jquants-file-key"
     assert values["MOOMOO_OPEND_HOST"] == "opend.example"
     assert values["MOOMOO_OPEND_PORT"] == "12345"
 
 
-def test_env_file_drops_upstream_keys_when_gateway_is_enabled(
+def test_env_file_ignores_old_gateway_and_direct_typesafe_settings(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     env_file = tmp_path / ".env"
@@ -89,7 +93,7 @@ def test_env_file_drops_upstream_keys_when_gateway_is_enabled(
 
     values = load_env_file(env_file)
 
-    assert values["JEV_GATEWAY_URL"] == "http://127.0.0.1:4789/v1/systemone"
+    assert "JEV_GATEWAY_URL" not in values
     assert "JEV_API_KEY" not in values
     assert "TYPESAFE_API_KEY" not in values
 

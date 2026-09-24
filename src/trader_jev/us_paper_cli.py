@@ -1609,7 +1609,7 @@ def _score_value(answer: Mapping[str, Any], name: str) -> Decimal:
 
 
 def _noul_probability(answer: Mapping[str, Any], name: str) -> Decimal:
-    value = answer.get("noul", answer.get("probability"))
+    value = answer.get("noul")
     if value is None:
         raise ValueError(f"Jev {name} answer has no Noul probability")
     parsed = Decimal(str(value))

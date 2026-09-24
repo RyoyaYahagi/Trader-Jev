@@ -29,6 +29,8 @@ from trader_jev.models import (
     TradeIntent,
 )
 
+TYPESAFE_NATIVE_RESPONSE_KEY = "__typesafe_native_response__"
+
 
 class JevRequest(DomainModel):
     """Compact, point-in-time request sent to a replaceable Jev client."""
@@ -192,6 +194,7 @@ class JevDecisionAdapter:
             data: dict[str, Any] = {str(key): value for key, value in parsed_mapping.items()}
         else:
             data = {str(key): value for key, value in raw.items()}
+        data.pop(TYPESAFE_NATIVE_RESPONSE_KEY, None)
         nested = data.get("decision")
         if isinstance(nested, Mapping):
             nested_mapping = cast(Mapping[object, Any], nested)
@@ -250,6 +253,10 @@ class JevDecisionAdapter:
             return raw.model_dump(mode="json")
         if isinstance(raw, str):
             return {"raw": raw[:2_048]}
+        native_response = raw.get(TYPESAFE_NATIVE_RESPONSE_KEY)
+        if isinstance(native_response, Mapping):
+            mapping = cast(Mapping[str, Any], native_response)
+            return {str(key): value for key, value in mapping.items()}
         return {str(key): value for key, value in raw.items()}
 
 

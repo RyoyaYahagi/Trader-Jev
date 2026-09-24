@@ -100,6 +100,7 @@ class ReportStore:
                     "decision_label": summary.run_config.get("decision_label", "ルール判定"),
                     "initial_capital": str(summary.portfolio.initial_capital),
                     "jpy_capital": summary.run_config.get("jpy_capital"),
+                    "capital_constraint": summary.run_config.get("capital_constraint"),
                     "usd_jpy_rate": summary.run_config.get("usd_jpy_rate"),
                 }
             )
@@ -150,10 +151,51 @@ class ReportStore:
         return {
             "timezone": timezone_name,
             "anchor_at": anchor.isoformat(),
+            "pricing": self._pricing_metadata(),
             "daily": period_payload(day_start, day_start + timedelta(days=1)),
             "weekly": period_payload(week_start, week_start + timedelta(days=7)),
             "monthly": period_payload(month_start, next_month),
         }
+
+    def _pricing_metadata(self) -> dict[str, Any]:
+        configurations: dict[tuple[str | None, str | None, str | None, str], dict[str, Any]] = {}
+        if not self.report_dir.is_dir():
+            return {"status": "UNAVAILABLE"}
+        for path in self.report_dir.glob("*.json"):
+            try:
+                payload = json.loads(path.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError):
+                continue
+            if not isinstance(payload, Mapping):
+                continue
+            run_config = payload.get("run_config")
+            if not isinstance(run_config, Mapping):
+                continue
+            if str(run_config.get("decision_mode", "")).upper() != "JEV":
+                continue
+            raw_pricing = run_config.get("jev_pricing")
+            if not isinstance(raw_pricing, Mapping):
+                continue
+            pricing = {
+                "input_usd_per_1k_tokens": raw_pricing.get("input_usd_per_1k_tokens"),
+                "output_usd_per_1k_tokens": raw_pricing.get("output_usd_per_1k_tokens"),
+                "request_usd": raw_pricing.get("request_usd"),
+                "currency": str(raw_pricing.get("currency", "USD")).upper(),
+            }
+            key = tuple(
+                None if pricing[name] is None else str(pricing[name])
+                for name in (
+                    "input_usd_per_1k_tokens",
+                    "output_usd_per_1k_tokens",
+                    "request_usd",
+                )
+            ) + (pricing["currency"],)
+            configurations[key] = pricing
+        if not configurations:
+            return {"status": "UNAVAILABLE"}
+        if len(configurations) > 1:
+            return {"status": "MULTIPLE"}
+        return {"status": "CONFIGURED", **next(iter(configurations.values()))}
 
     def _usage_records(self) -> tuple[JevUsageRecord, ...]:
         records: list[JevUsageRecord] = []
@@ -471,7 +513,9 @@ DASHBOARD_HTML = """<!doctype html>
     h1 { font-size: 24px; letter-spacing: .01em; }
     h2 { font-size: 16px; margin-bottom: 12px; }
     .muted { color: var(--muted); }
-    .toolbar { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+    .toolbar { display: flex; gap: 8px; align-items: flex-end; flex-wrap: wrap; }
+    .filter { display: flex; flex-direction: column; gap: 3px; }
+    .filter label { font-size: 11px; }
     select, button { background: var(--panel); border: 1px solid var(--line); color: var(--text); border-radius: 7px; padding: 8px 10px; }
     button { cursor: pointer; }
     .status { border-radius: 999px; padding: 5px 11px; font-weight: 700; font-size: 12px; background: var(--good); color: #08140d; }
@@ -507,8 +551,9 @@ DASHBOARD_HTML = """<!doctype html>
       <div id="run-meta" class="muted">レポートを読み込んでいます...</div>
     </div>
     <div class="toolbar">
-      <label for="report-select" class="muted">資金条件・判断方式</label>
-      <select id="report-select" aria-label="表示するレポート"></select>
+      <div class="filter"><label for="date-select" class="muted">開始日</label><select id="date-select" aria-label="開始日"></select></div>
+      <div class="filter"><label for="capital-select" class="muted">資金制約</label><select id="capital-select" aria-label="資金制約"></select></div>
+      <div class="filter"><label for="mode-select" class="muted">判断方式</label><select id="mode-select" aria-label="判断方式"></select></div>
       <button id="refresh" type="button">更新</button>
       <span id="status" class="status empty">読込中</span>
     </div>
@@ -526,7 +571,7 @@ DASHBOARD_HTML = """<!doctype html>
   <div class="grid">
     <section class="panel"><h2>ポジション</h2><div id="positions"></div></section>
     <section class="panel"><h2>実行状況</h2><div id="execution"></div></section>
-    <section class="panel wide"><h2>Jev使用料金（全条件の合計）</h2><div id="jev-costs"></div><div class="note">Jevは判断モデルの呼出しです。単価が未設定の場合、トークン数だけを表示して金額を推定しません。</div></section>
+    <section class="panel wide"><h2>Jev使用料金（全条件の合計）</h2><div id="jev-costs"></div><div id="jev-cost-note" class="note">トークン量を取得できなかった呼出は、料金に含めず未計上呼出数に表示します。</div></section>
     <section class="panel wide"><h2>取引損益（手数料控除後）</h2><div id="trades-table"></div></section>
     <section class="panel wide"><h2>仮想約定履歴</h2><div id="fills-table"></div></section>
   </div>
@@ -583,33 +628,105 @@ function render(data) {
 }
 function costAmount(item) {
   if (!item || item.request_count === 0) return 'Jev呼出なし';
-  if (item.estimated_cost === null || item.estimated_cost === undefined) return '単価未設定';
-  const prefix = item.cost_status === 'ESTIMATED' ? '推定 ' : '';
-  return prefix + money(item.estimated_cost) + ' USD';
+  if (item.estimated_cost === null || item.estimated_cost === undefined) return '算出不可';
+  const prefix = item.cost_status === 'PROVIDER_REPORTED' ? '' : '推定 ';
+  return prefix + money(item.estimated_cost) + ' ' + (item.currency || 'USD');
 }
 function renderCosts(data) {
   if (!data) { $('jev-costs').replaceChildren(); return; }
+  const pricing = data.pricing || {};
+  const costNote = $('jev-cost-note');
+  if (pricing.status === 'CONFIGURED') {
+    costNote.textContent = `設定単価: 入力 ${pricing.input_usd_per_1k_tokens ?? '未設定'} ${pricing.currency} / 1,000トークン、出力 ${pricing.output_usd_per_1k_tokens ?? '未設定'} ${pricing.currency} / 1,000トークン。トークン量を取得できなかった呼出は、料金に含めず未計上呼出数に表示します。`;
+  } else if (pricing.status === 'MULTIPLE') {
+    costNote.textContent = '集計期間内に複数の単価設定があります。料金は各呼出時の単価で計算した見積額です。トークン量を取得できなかった呼出は未計上です。';
+  } else {
+    costNote.textContent = 'レポートに単価設定がありません。料金は算出できず、トークン量を取得できなかった呼出は未計上呼出数に表示します。';
+  }
   const rows = ['daily', 'weekly', 'monthly'].map((period) => {
     const item = data[period] || {}; const label = period === 'daily' ? '日次' : period === 'weekly' ? '週次' : '月次';
-    return [label, `${item.period_start || '—'} ～ ${item.period_end || '—'}`, integer(item.request_count), integer(item.total_tokens), costAmount(item)];
+    return [label, `${item.period_start || '—'} ～ ${item.period_end || '—'}`, integer(item.request_count), integer(item.input_tokens), integer(item.output_tokens), integer(item.unpriced_request_count), costAmount(item)];
   });
-  $('jev-costs').replaceChildren(table(['集計単位', '対象期間', '呼出回数', '総トークン数', '料金'], rows));
+  $('jev-costs').replaceChildren(table(['集計単位', '対象期間', '呼出回数', '入力トークン', '出力トークン', '未計上呼出', '料金'], rows));
 }
-async function loadReports(selected) {
-  const response = await fetch('/api/reports', {cache: 'no-store'}); const payload = await response.json(); const select = $('report-select');
-  const current = selected || select.value; select.replaceChildren(); (payload.reports || []).forEach((x) => { const option = document.createElement('option'); option.value = x.name; const mode = x.decision_label || x.decision_mode || 'ルール判定'; const capital = x.jpy_capital ? `${yen(x.jpy_capital)}円` : (x.initial_capital ? `${money(x.initial_capital)} USD` : '単一条件'); option.textContent = `${x.scenario_label || capital} / ${mode} · ${x.name} (${x.status})`; select.appendChild(option); });
-  if (current && [...select.options].some((x) => x.value === current)) select.value = current;
-  return select.value;
+async function loadReports() {
+  const response = await fetch('/api/reports', {cache: 'no-store'}); const payload = await response.json();
+  const entries = (payload.reports || []).filter((report) => report.status !== 'INVALID' && report.started_at);
+  const previous = {
+    date: $('date-select').value,
+    capital: $('capital-select').value,
+    mode: $('mode-select').value,
+  };
+  const dateFor = (report) => {
+    const timestamp = new Date(report.started_at);
+    if (!Number.isFinite(timestamp.getTime())) return '';
+    const parts = new Intl.DateTimeFormat('en', {
+      timeZone: 'Asia/Tokyo', year: 'numeric', month: '2-digit', day: '2-digit',
+    }).formatToParts(timestamp);
+    const values = Object.fromEntries(parts.map((part) => [part.type, part.value]));
+    return `${values.year}-${values.month}-${values.day}`;
+  };
+  const capitalFor = (report) => {
+    const scenario = String(report.scenario_id || '');
+    if (scenario === 'single' || report.jpy_capital === null || report.jpy_capital === undefined) {
+      return {key: 'single', label: '単一条件'};
+    }
+    if (report.capital_constraint === null || report.capital_constraint === undefined || scenario.startsWith('unconstrained')) {
+      return {key: 'unconstrained', label: '制約なし'};
+    }
+    return {key: `jpy-${report.jpy_capital}`, label: `${yen(report.jpy_capital)}円制約`};
+  };
+  const uniqueOptions = (reports, getOption) => {
+    const options = new Map();
+    reports.forEach((report) => {
+      const option = getOption(report);
+      if (option && option.key) options.set(option.key, option);
+    });
+    return [...options.values()];
+  };
+  const fillSelect = (id, options, selectedKey) => {
+    const select = $(id);
+    select.replaceChildren();
+    options.forEach((item) => {
+      const option = document.createElement('option');
+      option.value = item.key;
+      option.textContent = item.label;
+      select.appendChild(option);
+    });
+    select.disabled = options.length === 0;
+    if (options.length) {
+      select.value = options.some((item) => item.key === selectedKey) ? selectedKey : options[0].key;
+    }
+    return select.value;
+  };
+
+  const dates = [...new Set(entries.map(dateFor).filter(Boolean))].sort().reverse();
+  const date = fillSelect('date-select', dates.map((value) => ({key: value, label: value})), previous.date);
+  const onDate = entries.filter((report) => dateFor(report) === date);
+  const capitals = uniqueOptions(onDate, capitalFor);
+  const capital = fillSelect('capital-select', capitals, previous.capital);
+  const onCapital = onDate.filter((report) => capitalFor(report).key === capital);
+  const modes = uniqueOptions(onCapital, (report) => ({
+    key: String(report.decision_mode || 'RULE').toUpperCase(),
+    label: report.decision_label || (String(report.decision_mode).toUpperCase() === 'JEV' ? 'Jev判定' : 'ルール判定'),
+  }));
+  const mode = fillSelect('mode-select', modes, previous.mode);
+  const matches = onCapital.filter((report) => String(report.decision_mode || 'RULE').toUpperCase() === mode);
+  matches.sort((left, right) => Date.parse(right.started_at) - Date.parse(left.started_at));
+  return matches[0] || null;
 }
-async function load(selected) {
+async function load() {
   try {
-    const name = await loadReports(selected); const url = name ? '/api/report?name=' + encodeURIComponent(name) : '/api/latest';
+    const report = await loadReports();
+    if (!report) throw new Error('選択条件に該当するレポートがありません');
+    const url = '/api/report?name=' + encodeURIComponent(report.name);
     const [response, costsResponse] = await Promise.all([fetch(url, {cache: 'no-store'}), fetch('/api/costs', {cache: 'no-store'})]);
     if (!response.ok) throw new Error((await response.json()).error || response.statusText);
     render(await response.json()); renderCosts(costsResponse.ok ? await costsResponse.json() : null);
   } catch (error) { $('status').textContent = 'ERROR'; $('status').className = 'status failed'; $('run-meta').textContent = String(error); }
 }
-$('refresh').addEventListener('click', () => load($('report-select').value)); $('report-select').addEventListener('change', () => load($('report-select').value)); load(); setInterval(() => load($('report-select').value), 15000);
+['date-select', 'capital-select', 'mode-select'].forEach((id) => $(id).addEventListener('change', () => load()));
+$('refresh').addEventListener('click', () => load()); load(); setInterval(() => load(), 15000);
 </script>
 </body>
 </html>

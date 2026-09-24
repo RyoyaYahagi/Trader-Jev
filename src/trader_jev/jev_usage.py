@@ -54,9 +54,7 @@ class JevPricingConfig(DomainModel):
         """Read optional rates without reading or exposing an API credential."""
 
         return cls(
-            input_usd_per_1k_tokens=_optional_decimal(
-                env.get("JEV_INPUT_PRICE_USD_PER_1K_TOKENS")
-            ),
+            input_usd_per_1k_tokens=_optional_decimal(env.get("JEV_INPUT_PRICE_USD_PER_1K_TOKENS")),
             output_usd_per_1k_tokens=_optional_decimal(
                 env.get("JEV_OUTPUT_PRICE_USD_PER_1K_TOKENS")
             ),
@@ -97,6 +95,8 @@ class JevUsageSummary(DomainModel):
     request_count: int = Field(default=0, ge=0)
     successful_request_count: int = Field(default=0, ge=0)
     failed_request_count: int = Field(default=0, ge=0)
+    priced_request_count: int = Field(default=0, ge=0)
+    unpriced_request_count: int = Field(default=0, ge=0)
     input_tokens: int = Field(default=0, ge=0)
     output_tokens: int = Field(default=0, ge=0)
     total_tokens: int = Field(default=0, ge=0)
@@ -184,24 +184,37 @@ def usage_records_from_audits(
 
 
 def summarize_usage(records: Sequence[JevUsageRecord]) -> JevUsageSummary:
-    """Aggregate records without hiding calls whose price is unknown."""
+    """Aggregate known costs while retaining calls with missing pricing data."""
 
     if not records:
         return JevUsageSummary()
 
-    costs = [record.estimated_cost for record in records]
-    if any(cost is None for cost in costs):
+    priced_records = tuple(record for record in records if record.estimated_cost is not None)
+    unpriced_request_count = len(records) - len(priced_records)
+    if not priced_records:
         estimated_cost: Decimal | None = None
         cost_status = "UNPRICED"
     else:
-        estimated_cost = sum((cost for cost in costs if cost is not None), Decimal("0"))
-        statuses = {record.cost_status for record in records}
-        cost_status = "PROVIDER_REPORTED" if statuses == {"PROVIDER_REPORTED"} else "ESTIMATED"
+        estimated_cost = sum(
+            (
+                record.estimated_cost
+                for record in priced_records
+                if record.estimated_cost is not None
+            ),
+            Decimal("0"),
+        )
+        if unpriced_request_count:
+            cost_status = "PARTIALLY_ESTIMATED"
+        else:
+            statuses = {record.cost_status for record in records}
+            cost_status = "PROVIDER_REPORTED" if statuses == {"PROVIDER_REPORTED"} else "ESTIMATED"
 
     return JevUsageSummary(
         request_count=len(records),
         successful_request_count=sum(record.success for record in records),
         failed_request_count=sum(not record.success for record in records),
+        priced_request_count=len(priced_records),
+        unpriced_request_count=unpriced_request_count,
         input_tokens=sum(record.input_tokens for record in records),
         output_tokens=sum(record.output_tokens for record in records),
         total_tokens=sum(record.total_tokens for record in records),

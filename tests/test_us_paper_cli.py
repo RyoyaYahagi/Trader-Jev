@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from collections.abc import Mapping, Sequence
 from datetime import datetime, timedelta
 from decimal import Decimal
@@ -24,13 +25,37 @@ from trader_jev.us_paper_cli import (
     USPaperConfig,
     USPaperRunSummary,
     USPaperStepResult,
+    USScanResult,
     USUniversePaperRunner,
+    _print_json,  # pyright: ignore[reportPrivateUsage]
     build_parser,
     parse_jev_opinion,
 )
 
 NOW = datetime(2026, 9, 24, 13, 30, tzinfo=ZoneInfo("America/New_York"))
 CODE = "US.AAPL"
+
+
+def test_print_json_serializes_scan_result_nested_in_mapping(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    scan = USScanResult(
+        run_id="scan-1",
+        as_of=NOW,
+        universe_count=1,
+        screened_count=1,
+        hard_filter_rejected_count=0,
+        lane_union_count=1,
+        snapshot_count=1,
+        minute_bar_count=0,
+        candidate_count=1,
+    )
+
+    _print_json({"scan": scan, "opinions": {}})
+
+    result = json.loads(capsys.readouterr().out)
+    assert result["scan"]["run_id"] == "scan-1"
+    assert result["scan"]["as_of"] == NOW.isoformat()
 
 
 def test_noul_does_not_fabricate_confidence() -> None:

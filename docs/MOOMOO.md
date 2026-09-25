@@ -13,6 +13,8 @@ cd /home/yappa/dev/app/Trader-Jev
 uv sync
 ```
 
+このSDKのStock Screener応答解析は`FieldDescriptor.label`を参照します。Python用Protocol Buffers 7.34.0で同属性が削除されたため、依存条件を`protobuf<7.34.0`に制限しています。[Protocol Buffers公式 (2026/09), Migration Guide: v34.0] 回帰テストは[tests/test_moomoo_protobuf_compat.py](../tests/test_moomoo_protobuf_compat.py)で、このSDKの応答解析を検証します。
+
 プロジェクト外のPython環境で直接導入する場合は、添付OpenDと版を合わせて次を実行します。
 
 ```bash
@@ -159,5 +161,7 @@ trader-jev-forward-paper --fee-schedule MOOMOO_US_BASIC
 [Moomoo証券公式, 2026/09] "米国株・ETF手数料について." https://www.moomoo.com/jp/support/topic7_184
 
 [Moomoo証券公式, 2026/09] "日本株・ETF手数料及びその他費用について." https://www.moomoo.com/jp/support/topic7_189
+
+[Protocol Buffers公式, 2026/09] Google. "Migration Guide." Protocol Buffers Documentation. https://protobuf.dev/support/migration/
 
 [添付OpenDアーカイブ, 2026/09] `moomoo_OpenD_10.11.7108_Ubuntu18.04.tar.gz`, `README.txt`・`OpenD.xml`.

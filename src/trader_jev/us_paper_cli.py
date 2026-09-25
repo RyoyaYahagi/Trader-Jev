@@ -1756,22 +1756,18 @@ def _load_env(path: Path) -> Mapping[str, str]:
 
 
 def _print_json(value: object) -> None:
-    output: object = value
-    if isinstance(value, DomainModel):
-        output = value.model_dump(mode="json")
-    elif isinstance(value, tuple):
-        serialized: list[object] = []
-        for item in cast(tuple[object, ...], value):
-            serialized.append(
-                item.model_dump(mode="json") if isinstance(item, DomainModel) else item
-            )
-        output = serialized
-    print(json.dumps(output, ensure_ascii=False, default=_json_default, indent=2))
+    print(json.dumps(_jsonable(value), ensure_ascii=False, default=_json_default, indent=2))
 
 
 def _jsonable(value: object) -> Any:
     if isinstance(value, DomainModel):
-        return value.model_dump(mode="json")
+        return _jsonable(value.model_dump(mode="json"))
+    if isinstance(value, Mapping):
+        entries = cast(Mapping[object, object], value)
+        return {str(key): _jsonable(item) for key, item in entries.items()}
+    if isinstance(value, (list, tuple)):
+        items = cast(Sequence[object], value)
+        return [_jsonable(item) for item in items]
     return value
 
 

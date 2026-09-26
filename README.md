@@ -59,6 +59,7 @@ moomoo APIは市場データ取得に限って使用します。注文・口座�
 9. [MOOMOO.md](docs/MOOMOO.md)（OpenDからの読み取り専用リアルタイム株価取得）
 10. [JEV_EXPERIMENTS.md](docs/JEV_EXPERIMENTS.md)（Jev入出力と実験台帳）
 11. [US_UNIVERSE_PAPER.md](docs/US_UNIVERSE_PAPER.md)（米国株ユニバース・Paper運用）
+12. [AUTO_REPAIR.md](docs/AUTO_REPAIR.md)（Codex CLIによる障害時の自動修復）
 
 GitHub Issue #1 をロードマップの起点とします。
 

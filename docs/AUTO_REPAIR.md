@@ -4,6 +4,8 @@ Paper 運用は、開発用チェックアウトから独立した runtime clone
 
 ## 動作
 
+自動修復の Codex CLI はモデル `gpt-6-luna`、推論強度 `xhigh` を起動引数で明示します。ユーザーの Codex 設定は読み込まないため、個人設定や CLI の既定値の変更によって修復用モデルが変わりません。
+
 1. `trader-jev-auto-repair.service` は10秒間隔で Paper unit を監視します。Paper unit が正常で未解決の障害記録もない場合、Codex CLI は呼び出されません。Paper unit が失敗し、未解決の障害記録がない場合に、新しい修復を始めます。
 2. helper は `%h/.local/state/trader-jev/incident-state.json` に障害状態を保存し、同じ場所の `worktree` に修復用 worktree を維持します。診断は `repair.log` に追記し、Codex の最終応答は `response-<試行番号>.json` に保存します。再起動後も保存済みの状態から修復を続けます。この状態ディレクトリは runtime clone の導入前後で移動・削除しません。
 3. Codex の1回の呼び出しは最大45分です。修正と検査を合わせた1サイクルは最大90分です。時間内に直らない場合、helper は状態と候補差分を残し、30秒から最大30分まで段階的に延ばした待ち時間の後に再試行します。

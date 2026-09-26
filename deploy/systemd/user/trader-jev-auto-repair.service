@@ -1,15 +1,21 @@
 [Unit]
-Description=Diagnose and repair one failed Trader-Jev Paper run with Codex
+Description=Monitor and repair failed Trader-Jev Paper runs with Codex
 After=trader-jev-forward-paper.service
+StartLimitIntervalSec=0
 
 [Service]
-Type=oneshot
+Type=exec
 WorkingDirectory=/home/yappa/dev/app/Trader-Jev
 ExecStart=/home/yappa/dev/app/Trader-Jev/.venv/bin/python -m trader_jev.auto_repair --repo /home/yappa/dev/app/Trader-Jev --state-dir %h/.local/state/trader-jev --unit trader-jev-forward-paper.service --codex /home/yappa/.local/bin/codex
-TimeoutStartSec=14400
+TimeoutStartSec=0
+Restart=on-failure
+RestartSec=60
 NoNewPrivileges=yes
 PrivateTmp=yes
 ProtectSystem=full
 InaccessiblePaths=/home/yappa/dev/app/Trader-Jev/.env
 StandardOutput=journal
 StandardError=journal
+
+[Install]
+WantedBy=default.target

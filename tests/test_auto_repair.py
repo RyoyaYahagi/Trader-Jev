@@ -146,7 +146,13 @@ def test_progress_requires_new_error_free_summary_and_matching_decision(
 def test_incident_state_persists_and_redacts_diagnostic_log(tmp_path: Path) -> None:
     state_path = tmp_path / "incident-state.json"
     log_path = tmp_path / "repair.log"
-    state = {"incident_id": "incident-1", "attempt": 3, "status": "repairing"}
+    state = {
+        "incident_id": "incident-1",
+        "attempt": 3,
+        "status": "repairing",
+        "runtime_repo": str(tmp_path / "runtime"),
+        "runtime_head": "verified-runtime-commit",
+    }
 
     _persist_incident(state_path, log_path, state, "gate_failed", "api_key=secret-value")
 
@@ -154,6 +160,8 @@ def test_incident_state_persists_and_redacts_diagnostic_log(tmp_path: Path) -> N
     assert restored is not None
     assert restored["incident_id"] == "incident-1"
     assert restored["attempt"] == 3
+    assert restored["runtime_repo"] == str(tmp_path / "runtime")
+    assert restored["runtime_head"] == "verified-runtime-commit"
     log = log_path.read_text(encoding="utf-8")
     assert "secret-value" not in log
     assert "[REDACTED]" in log
@@ -192,10 +200,11 @@ def test_validation_gate_keeps_systemd_isolation_and_minimal_environment(
     monkeypatch.setattr(auto_repair, "_run", run)
     worktree = tmp_path / "worktree"
     tools_dir = tmp_path / ".venv" / "bin"
+    tools_dir.mkdir(parents=True)
     auto_repair._run_gates(worktree, tools_dir, auto_repair.time.monotonic() + 60)
 
     assert len(calls) == 3
-    for args in calls:
+    for args, validator in zip(calls, ("ruff", "pyright", "pytest"), strict=True):
         assert args[0] == "/usr/bin/systemd-run"
         assert "--property=ProtectHome=tmpfs" in args
         assert "--property=ProtectSystem=strict" in args
@@ -206,12 +215,42 @@ def test_validation_gate_keeps_systemd_isolation_and_minimal_environment(
         assert "--property=PrivateTmp=yes" in args
         assert f"--property=WorkingDirectory={worktree}" in args
         assert f"--property=BindReadOnlyPaths={worktree}" in args
-        assert any(
-            value.startswith("--property=BindReadOnlyPaths=") and value.endswith("/.venv")
-            for value in args
-        )
+        assert f"--property=BindReadOnlyPaths={tools_dir.resolve().parent}" in args
+        assert str(tools_dir.resolve() / validator) in args
         assert "HOME=/tmp" in args
         assert not any(arg.startswith("CODEX_HOME=") for arg in args)
+
+
+def test_validation_gate_pins_imports_to_candidate_checkout(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    calls: list[list[str]] = []
+
+    def run(command: Sequence[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
+        args = list(command)
+        calls.append(args)
+        return subprocess.CompletedProcess(args, 0, "", "")
+
+    monkeypatch.setattr(auto_repair, "_run", run)
+    runtime = tmp_path / "runtime"
+    candidate = tmp_path / "candidate"
+    real_venv = tmp_path / "shared-venv"
+    tools_dir = real_venv / "bin"
+    tools_dir.mkdir(parents=True)
+    (runtime / ".venv").parent.mkdir(parents=True)
+    (runtime / ".venv").symlink_to(real_venv, target_is_directory=True)
+    symlinked_tools_dir = runtime / ".venv" / "bin"
+
+    auto_repair._run_gates(candidate, symlinked_tools_dir, auto_repair.time.monotonic() + 60)
+
+    assert len(calls) == 3
+    for args, validator in zip(calls, ("ruff", "pyright", "pytest"), strict=True):
+        pythonpath = next(value for value in args if value.startswith("PYTHONPATH="))
+        assert pythonpath == f"PYTHONPATH={candidate}/src"
+        assert pythonpath != f"PYTHONPATH={runtime}/src"
+        assert f"--property=BindReadOnlyPaths={real_venv}" in args
+        assert f"--property=BindReadOnlyPaths={real_venv / 'bin'}" not in args
+        assert str(real_venv / "bin" / validator) in args
 
 
 def _git(repo: Path, *arguments: str) -> str:
@@ -570,6 +609,57 @@ def test_dirty_active_checkout_waits_without_codex_or_overwrite(
     assert "local changes" in state["last_feedback"]
     assert human_file.read_text(encoding="utf-8") == "keep my local work\n"
     assert calls == []
+
+
+def test_repair_commit_changes_runtime_clone_only_and_preserves_development_checkout(
+    tmp_path: Path,
+) -> None:
+    development = tmp_path / "development"
+    development.mkdir()
+    _make_repair_repo(development)
+    development_branch = _git(development, "branch", "--show-current")
+    human_file = development / "human-notes.txt"
+    human_file.write_text("uncommitted development work\n", encoding="utf-8")
+
+    runtime = tmp_path / "runtime"
+    subprocess.run(
+        ["git", "clone", "--quiet", str(development), str(runtime)],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    (runtime / ".venv").mkdir()
+    base = _git(runtime, "rev-parse", "HEAD")
+    candidate = tmp_path / "candidate"
+    auto_repair._create_worktree(runtime, candidate, base)
+    (candidate / "src/trader_jev/repair_target.py").write_text("VALUE = 2\n", encoding="utf-8")
+    patch = subprocess.run(
+        ["git", "diff", "--binary", base],
+        cwd=candidate,
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout
+    state: dict[str, Any] = {
+        "branch": "codex/auto-paper-recovery-test",
+        "branch_active": False,
+        "original_branch": _git(runtime, "branch", "--show-current"),
+        "runtime_head": base,
+    }
+
+    updated_head = auto_repair._commit_candidate(runtime, candidate, state, patch)
+
+    assert updated_head != base
+    assert _git(runtime, "rev-parse", "HEAD") == updated_head
+    assert (runtime / "src/trader_jev/repair_target.py").read_text() == "VALUE = 2\n"
+    assert _git(development, "branch", "--show-current") == development_branch
+    assert _git(development, "rev-parse", "HEAD") == base
+    assert _git(development, "status", "--porcelain") == "?? human-notes.txt"
+    assert human_file.read_text(encoding="utf-8") == "uncommitted development work\n"
+
+    _git(development, "switch", "--quiet", "--detach", base)
+    assert _git(runtime, "rev-parse", "HEAD") == updated_head
+    assert _git(runtime, "branch", "--show-current") == state["branch"]
 
 
 def test_failed_gate_feedback_reuses_persistent_worktree(

@@ -405,6 +405,7 @@ def _create_worktree(repo: Path, destination: Path, base: str) -> None:
 
 def _run_gates(worktree: Path, tools_dir: Path, deadline: float) -> None:
     pythonpath = str(worktree / "src")
+    validator_tools = tools_dir.resolve(strict=True)
     environment = (
         "HOME=/tmp",
         "PATH=/usr/local/bin:/usr/bin:/bin",
@@ -417,6 +418,7 @@ def _run_gates(worktree: Path, tools_dir: Path, deadline: float) -> None:
         [str(tools_dir / "pyright")],
         [str(tools_dir / "pytest"), "-p", "no:cacheprovider"],
     ):
+        command[0] = str(validator_tools / Path(command[0]).name)
         remaining = deadline - time.monotonic()
         if remaining <= 0:
             raise RepairError("automatic repair exceeded its total 90-minute time limit")
@@ -439,7 +441,7 @@ def _run_gates(worktree: Path, tools_dir: Path, deadline: float) -> None:
             "--property=NoNewPrivileges=yes",
             "--property=PrivateTmp=yes",
             f"--property=BindReadOnlyPaths={worktree}",
-            f"--property=BindReadOnlyPaths={tools_dir.parent}",
+            f"--property=BindReadOnlyPaths={validator_tools.parent}",
             "--",
             "/usr/bin/env",
             "-i",

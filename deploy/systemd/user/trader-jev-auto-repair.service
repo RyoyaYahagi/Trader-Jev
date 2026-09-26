@@ -5,8 +5,9 @@ StartLimitIntervalSec=0
 
 [Service]
 Type=exec
-WorkingDirectory=/home/yappa/dev/app/Trader-Jev
-ExecStart=/home/yappa/dev/app/Trader-Jev/.venv/bin/python -m trader_jev.auto_repair --repo /home/yappa/dev/app/Trader-Jev --state-dir %h/.local/state/trader-jev --unit trader-jev-forward-paper.service --codex /home/yappa/.local/bin/codex
+WorkingDirectory=%h/.local/share/trader-jev/runtime
+Environment=PYTHONPATH=%h/.local/share/trader-jev/runtime/src
+ExecStart=%h/.local/share/trader-jev/runtime/.venv/bin/python -m trader_jev.auto_repair --repo %h/.local/share/trader-jev/runtime --state-dir %h/.local/state/trader-jev --unit trader-jev-forward-paper.service --codex /home/yappa/.local/bin/codex
 TimeoutStartSec=0
 Restart=on-failure
 RestartSec=60

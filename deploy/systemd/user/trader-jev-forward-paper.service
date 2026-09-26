@@ -5,8 +5,9 @@ After=moomoo-opend.service jev-gateway.service
 
 [Service]
 Type=oneshot
-WorkingDirectory=/home/yappa/dev/app/Trader-Jev
-ExecStart=/home/yappa/dev/app/Trader-Jev/.venv/bin/trader-jev --config /home/yappa/dev/app/Trader-Jev/configs/us-equity-paper.yaml --env-file /home/yappa/dev/app/Trader-Jev/.env paper-run --until-market-close --usd-jpy 157.92 --usd-jpy-as-of 2026-09-24T10:13:47+09:00 --usd-jpy-source "Investing.com USD/JPY real-time quote"
+WorkingDirectory=%h/.local/share/trader-jev/runtime
+Environment=PYTHONPATH=%h/.local/share/trader-jev/runtime/src
+ExecStart=%h/.local/share/trader-jev/runtime/.venv/bin/trader-jev --config %h/.local/share/trader-jev/runtime/configs/us-equity-paper.yaml --env-file /home/yappa/dev/app/Trader-Jev/.env paper-run --until-market-close --usd-jpy 157.92 --usd-jpy-as-of 2026-09-24T10:13:47+09:00 --usd-jpy-source "Investing.com USD/JPY real-time quote"
 TimeoutStartSec=24000
 StandardOutput=journal
 StandardError=journal

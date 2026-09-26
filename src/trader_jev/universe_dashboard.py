@@ -6,11 +6,12 @@ import json
 import sqlite3
 from collections.abc import Generator
 from contextlib import contextmanager
+from datetime import date, datetime
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import Any, cast
 
-from trader_jev.us_equity import USPaperPortfolio
+from trader_jev.us_equity import US_EASTERN, USPaperPortfolio
 
 
 class UniverseDashboardStore:
@@ -250,10 +251,21 @@ class UniverseDashboardStore:
                 portfolio = USPaperPortfolio.model_validate_json(str(row[1]))
                 net_pnl = portfolio.realized_pnl_usd + portfolio.unrealized_pnl_usd
                 initial_capital_usd = portfolio.initial_cash_jpy / portfolio.initial_usd_jpy_rate
+                latest_scan = db.execute(
+                    "SELECT MAX(recorded_at) FROM screening_results"
+                ).fetchone()[0]
+                portfolio_session_date = _us_session_date(str(row[0]))
+                scan_session_date = _us_session_date(latest_scan)
                 return {
                     "available": True,
                     "portfolio_id": portfolio.portfolio_id,
                     "updated_at": str(row[0]),
+                    "latest_screen_at": str(latest_scan) if latest_scan is not None else None,
+                    "stale": (
+                        scan_session_date > portfolio_session_date
+                        if scan_session_date is not None and portfolio_session_date is not None
+                        else False
+                    ),
                     "realized_pnl_usd": format(portfolio.realized_pnl_usd, "f"),
                     "unrealized_pnl_usd": format(portfolio.unrealized_pnl_usd, "f"),
                     "net_pnl_usd": format(net_pnl, "f"),
@@ -482,6 +494,18 @@ def _string(value: object) -> str | None:
     if value is None:
         return None
     return str(value)[:300]
+
+
+def _us_session_date(value: object) -> date | None:
+    if not isinstance(value, str):
+        return None
+    try:
+        timestamp = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if timestamp.tzinfo is None or timestamp.utcoffset() is None:
+        return None
+    return timestamp.astimezone(US_EASTERN).date()
 
 
 def _enum_value(value: object) -> str | None:

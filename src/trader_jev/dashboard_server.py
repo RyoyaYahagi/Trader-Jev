@@ -1543,8 +1543,12 @@ function renderUniversePerformance(data) {
   $('universe-realized-pnl').textContent = available ? signed(data.realized_pnl_usd) : '—';
   $('universe-unrealized-pnl').textContent = available ? signed(data.unrealized_pnl_usd) : '—';
   $('universe-fees').textContent = available ? money(data.fees_usd) : '—';
+  const latestScreen = data.latest_screen_at ? ` · 最新スクリーニング ${formatDateTime(data.latest_screen_at)}` : '';
+  const staleNotice = data.stale === true
+    ? ' 最新スクリーニングは別の米国市場日付ですが、その実行後の資産状態はありません。損益は前回保存時点の値です。'
+    : '';
   $('universe-performance-note').textContent = available
-    ? `資産記録 ${formatDateTime(data.updated_at)} · 正味損益は実現損益と含み損益の合計です。収益率は初期円資金を初期換算レートで米ドル換算した額を分母にします。円現金準備分の為替差損益は含みません。資産評価額は現在の米ドル円 ${money(data.usd_jpy_rate)} 円で円現金を換算するため、正味損益とは一致しない場合があります。`
+    ? `資産記録 ${formatDateTime(data.updated_at)}${latestScreen} · 正味損益は実現損益と含み損益の合計です。収益率は初期円資金を初期換算レートで米ドル換算した額を分母にします。円現金準備分の為替差損益は含みません。資産評価額は現在の米ドル円 ${money(data.usd_jpy_rate)} 円で円現金を換算するため、正味損益とは一致しない場合があります。${staleNotice}`
     : 'まだ資産記録がありません。自動Paper実行が最初のポートフォリオを保存すると、ここに損益が表示されます。';
 }
 async function loadUniversePerformance() {

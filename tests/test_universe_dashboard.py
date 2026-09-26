@@ -39,6 +39,33 @@ def test_performance_reports_latest_saved_paper_portfolio(tmp_path: Path) -> Non
     assert performance["fees_usd"] == "0.25"
     assert performance["position_count"] == 1
     assert Decimal(performance["return_ratio"]) == Decimal("0.0105")
+    assert performance["stale"] is False
+
+
+def test_performance_marks_a_newer_us_market_session_as_stale(tmp_path: Path) -> None:
+    path = tmp_path / "paper.sqlite3"
+    paper_store = USUniversePaperStore(path)
+    paper_store.save_portfolio(
+        USPaperPortfolio.initial(
+            initial_cash_jpy=Decimal("100000"),
+            usd_jpy_rate=Decimal("150"),
+            cash_reserve_pct=Decimal("0.1"),
+            at=datetime(2026, 9, 24, 19, 59, tzinfo=UTC),
+        )
+    )
+    paper_store.record(
+        "screening_results",
+        run_id="next-session-screen",
+        symbol="US.AAPL",
+        payload={"accepted": True},
+        recorded_at=datetime(2026, 9, 25, 13, 30, tzinfo=UTC),
+    )
+
+    performance = UniverseDashboardStore(path).performance()
+
+    assert performance["stale"] is True
+    assert performance["updated_at"] == "2026-09-24T19:59:00+00:00"
+    assert performance["latest_screen_at"] == "2026-09-25T13:30:00+00:00"
 
 
 def test_dashboard_store_closes_read_only_connections(tmp_path: Path) -> None:

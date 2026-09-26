@@ -998,7 +998,7 @@ DASHBOARD_HTML = """<!doctype html>
   <nav id="view-nav" class="view-nav" aria-label="ダッシュボードの画面">
     <button type="button" data-view="overview" aria-current="page">概要</button>
     <button type="button" data-view="universe">銘柄スクリーニング</button>
-    <button type="button" data-view="trades">取引記録</button>
+    <button type="button" data-view="trades">自動運用・取引記録</button>
     <button type="button" data-view="analysis">Jev分析</button>
   </nav>
   <section id="overview-page" class="page-view">
@@ -1091,7 +1091,7 @@ DASHBOARD_HTML = """<!doctype html>
     </details>
   </section>
   <section id="trades-page" class="page-view" hidden>
-    <div class="page-head"><div><h2>取引記録</h2><p>ユニバースPaperの仮想注文と仮想約定を表示します。</p></div><div id="trades-updated" class="subtle">読み込み待ち</div></div>
+    <div class="page-head"><div><h2>自動運用・取引記録</h2><p>自動Paper運用の損益、仮想注文、仮想約定を表示します。</p></div><div id="trades-updated" class="subtle">読み込み待ち</div></div>
     <div class="page-kpis" aria-label="取引記録の件数">
       <div class="kpi"><div class="kpi-label">仮想注文</div><div id="trades-kpi-orders" class="kpi-value">—</div></div>
       <div class="kpi"><div class="kpi-label">仮想約定</div><div id="trades-kpi-fills" class="kpi-value">—</div></div>

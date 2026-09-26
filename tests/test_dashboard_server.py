@@ -557,6 +557,8 @@ def test_dashboard_html_has_overview_sections_without_top_level_mode_selector() 
     assert 'id="pnl-chart"' in DASHBOARD_HTML
     assert 'id="decision-funnel"' in DASHBOARD_HTML
     assert 'id="recent-trades"' in DASHBOARD_HTML
+    assert 'data-view="trades">自動運用・取引記録</button>' in DASHBOARD_HTML
+    assert 'id="universe-net-pnl"' in DASHBOARD_HTML
     assert 'id="mode-select"' not in DASHBOARD_HTML
     assert 'aria-label="ペーパー運用の成績"' in DASHBOARD_HTML
     assert "正味損益（米ドル）" in DASHBOARD_HTML

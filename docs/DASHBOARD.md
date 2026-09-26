@@ -75,14 +75,27 @@ The page refreshes the report index every 15 seconds; a running Forward Paper
 session becomes visible after it writes its session report.
 
 ダッシュボードには、米国株ユニバースPaper用の「銘柄スクリーニング」
-「取引記録」「Jev分析」画面もあります。既定では、リポジトリ内の
+「自動運用・取引記録」「Jev分析」画面もあります。「自動運用・取引記録」には
+SQLite台帳に保存された正味損益、実現損益、含み損益、収益率、資産評価額、手数料を
+表示します。正味損益は実現損益と含み損益の合計です。収益率は初期円資金を初期の
+米ドル円レートで米ドル換算した額を分母にします。円現金準備分の為替差損益は含みません。
+資産評価額は保存された最新の米ドル円レートで円現金を米ドル換算するため、正味損益と
+一致しない場合があります。
+
+既定では、リポジトリ内の
 `data/us_equity_paper.sqlite3` を使います。別のSQLiteファイルを読む場合は
 `--universe-db` で指定します。データベースは読み取り専用で開きます。
 スクリーニング画面には最新の保存済み結果と除外理由を表示します。
 銘柄マスターの検索結果は、スクリーニング通過銘柄と区別して表示します。
 Jev分析画面には候補順位、要約したJev評価、判断を表示します。
-取引記録画面には仮想注文と仮想約定を表示します。Jevへの生の要求・応答は
+「自動運用・取引記録」には仮想注文と仮想約定も表示します。Jevへの生の要求・応答は
 ブラウザーへ返しません。
+
+2026-09-25の定期実行は、スクリーニング結果503行を保存した後、資産状態を保存する前に
+SQLite接続を閉じていなかったため、プロセスが同時に開けるファイル数の上限に達して失敗しました。
+そのため、この実行にはポートフォリオ状態がなく、
+損益を表示できません。修正後の次回成功実行が最初のポートフォリオ状態を保存すると、
+「自動運用・取引記録」に損益が表示されます。失敗した実行の損益は後から補完されません。
 
 The JSON read endpoints are `/api/reports`, `/api/latest`, and
 `/api/report?name=<report-file-name>`. `/api/compare?date=<date>&capital_key=<key>`
@@ -92,7 +105,8 @@ for the latest usage day, Monday-to-Sunday week, and calendar month.
 `/api/universe` returns the latest saved screen and candidate analysis,
 `/api/universe/listings?q=<text>&offset=<n>&limit=<n>` searches the cached
 listing master, and `/api/universe/trades` returns recent simulated orders and
-fills.
+fills. `/api/universe/performance` returns the latest persisted portfolio value
+and PnL totals for the automated U.S. universe Paper run.
 The server binds to `127.0.0.1` by default so the report is not exposed to the
 network.
 Report error messages stay in the local report; the dashboard API shows their

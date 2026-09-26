@@ -185,20 +185,64 @@ def _create_worktree(repo: Path, destination: Path) -> str:
 
 
 def _run_gates(worktree: Path, tools_dir: Path, deadline: float) -> None:
-    environment = _codex_environment()
-    existing_pythonpath = os.environ.get("PYTHONPATH")
-    environment["PYTHONPATH"] = str(worktree / "src") + (
-        os.pathsep + existing_pythonpath if existing_pythonpath else ""
+    pythonpath = str(worktree / "src")
+    environment = (
+        "HOME=/tmp",
+        "PATH=/usr/local/bin:/usr/bin:/bin",
+        f"PYTHONPATH={pythonpath}",
+        "PYTHONDONTWRITEBYTECODE=1",
+        "TMPDIR=/tmp",
     )
     for command in (
         [str(tools_dir / "ruff"), "check", "."],
         [str(tools_dir / "pyright")],
-        [str(tools_dir / "pytest")],
+        [str(tools_dir / "pytest"), "-p", "no:cacheprovider"],
     ):
         remaining = deadline - time.monotonic()
         if remaining <= 0:
             raise RepairError("automatic repair exceeded its total 90-minute time limit")
-        _run(command, cwd=worktree, timeout=remaining, env=environment)
+        gate_name = Path(command[0]).name
+        sandbox_command = [
+            "/usr/bin/systemd-run",
+            "--user",
+            "--quiet",
+            "--pipe",
+            "--wait",
+            "--collect",
+            f"--unit=trader-jev-auto-repair-gate-{os.getpid()}-{time.monotonic_ns()}",
+            f"--property=WorkingDirectory={worktree}",
+            f"--property=RuntimeMaxSec={max(1, int(remaining))}s",
+            "--property=ProtectHome=tmpfs",
+            "--property=ProtectSystem=strict",
+            "--property=ProtectProc=invisible",
+            "--property=ProcSubset=pid",
+            "--property=PrivateNetwork=yes",
+            "--property=NoNewPrivileges=yes",
+            "--property=PrivateTmp=yes",
+            f"--property=BindReadOnlyPaths={worktree}",
+            f"--property=BindReadOnlyPaths={tools_dir.parent}",
+            "--",
+            "/usr/bin/env",
+            "-i",
+            *sorted(environment),
+            *command,
+        ]
+        manager_environment = {
+            key: os.environ[key]
+            for key in (
+                "HOME",
+                "LANG",
+                "LC_ALL",
+                "PATH",
+                "XDG_RUNTIME_DIR",
+                "DBUS_SESSION_BUS_ADDRESS",
+            )
+            if key in os.environ
+        }
+        try:
+            _run(sandbox_command, timeout=remaining, env=manager_environment)
+        except RepairError as exc:
+            raise RepairError(f"{gate_name} validator failed: {exc}") from exc
 
 
 def _codex_environment() -> dict[str, str]:
@@ -306,7 +350,9 @@ def repair(repo: Path, state_dir: Path, unit: str, codex: str) -> None:
         if not _repo_is_clean(repo):
             raise RepairError("active checkout has local changes; refusing to overlay an AI patch")
         diagnostics = _journal(unit)
-        with tempfile.TemporaryDirectory(prefix="trader-jev-repair-") as temporary_dir:
+        with tempfile.TemporaryDirectory(
+            prefix="repair-worktree-", dir=state_dir
+        ) as temporary_dir:
             worktree = Path(temporary_dir) / "worktree"
             base = _create_worktree(repo, worktree)
             try:
@@ -349,7 +395,6 @@ def repair(repo: Path, state_dir: Path, unit: str, codex: str) -> None:
                 changed = sorted(changed_paths(diff))
                 try:
                     _apply_candidate_diff(repo, diff, base)
-                    _run_gates(repo, venv / "bin", deadline)
                     _run(["git", "add", "--", *changed], cwd=repo)
                     _run(
                         [

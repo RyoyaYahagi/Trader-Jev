@@ -117,7 +117,7 @@ def _stub_processes(
     repo: Path,
     *,
     real_run: Callable[..., subprocess.CompletedProcess[str]],
-    fail_active_gate: bool,
+    fail_gate: bool,
 ) -> tuple[
     list[list[str]],
     list[tuple[str, Path]],
@@ -143,9 +143,33 @@ def _stub_processes(
             target = cwd / "src/trader_jev/repair_target.py"
             target.write_text("VALUE = 2\n", encoding="utf-8")
             return subprocess.CompletedProcess(command_args, 0, "{}\n", "")
-        if program in {"ruff", "pyright", "pytest"}:
-            gate_calls.append((program, cwd))
-            if fail_active_gate and cwd == repo and program == "pyright":
+        if program == "systemd-run":
+            assert "--property=ProtectHome=tmpfs" in command_args
+            assert "--property=ProtectSystem=strict" in command_args
+            assert "--property=ProtectProc=invisible" in command_args
+            assert "--property=ProcSubset=pid" in command_args
+            assert "--property=PrivateNetwork=yes" in command_args
+            assert "--property=NoNewPrivileges=yes" in command_args
+            assert "HOME=/tmp" in command_args
+            assert not any("CODEX_HOME=" in arg for arg in command_args)
+            gate = next(
+                name
+                for name in ("ruff", "pyright", "pytest")
+                if any(arg.endswith(f"/bin/{name}") for arg in command_args)
+            )
+            working_dir = next(
+                Path(arg.removeprefix("--property=WorkingDirectory="))
+                for arg in command_args
+                if arg.startswith("--property=WorkingDirectory=")
+            )
+            assert f"--property=BindReadOnlyPaths={working_dir}" in command_args
+            assert any(
+                arg.startswith("--property=BindReadOnlyPaths=")
+                and arg.endswith("/.venv")
+                for arg in command_args
+            )
+            gate_calls.append((gate, working_dir))
+            if fail_gate and gate == "pyright":
                 return subprocess.CompletedProcess(command_args, 1, "", "stub gate failure")
             return subprocess.CompletedProcess(command_args, 0, "", "")
         raise AssertionError(f"unexpected external command: {command_args}")
@@ -162,7 +186,7 @@ def test_successful_repair_commits_incident_branch_and_restarts_paper(
     base_commit = _git(repo, "rev-parse", "HEAD")
     real_run = subprocess.run
     systemctl_calls, gate_calls, dispatch = _stub_processes(
-        repo, real_run=real_run, fail_active_gate=False
+        repo, real_run=real_run, fail_gate=False
     )
 
     monkeypatch.setattr(auto_repair.subprocess, "run", dispatch)
@@ -179,10 +203,12 @@ def test_successful_repair_commits_incident_branch_and_restarts_paper(
         ["--user", "reset-failed", auto_repair.PAPER_UNIT],
         ["--user", "start", "--no-block", auto_repair.PAPER_UNIT],
     ]
-    assert len(gate_calls) == 6
+    assert len(gate_calls) == 3
+    assert all(path != repo for _, path in gate_calls)
+    assert all((tmp_path / "state") in path.parents for _, path in gate_calls)
 
 
-def test_gate_failure_rolls_back_branch_and_does_not_restart_paper(
+def test_gate_failure_does_not_apply_patch_or_restart_paper(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     repo = tmp_path / "repo"
@@ -191,11 +217,11 @@ def test_gate_failure_rolls_back_branch_and_does_not_restart_paper(
     base_commit = _git(repo, "rev-parse", "HEAD")
     real_run = subprocess.run
     systemctl_calls, gate_calls, dispatch = _stub_processes(
-        repo, real_run=real_run, fail_active_gate=True
+        repo, real_run=real_run, fail_gate=True
     )
 
     monkeypatch.setattr(auto_repair.subprocess, "run", dispatch)
-    with pytest.raises(RepairError, match="pyright exited 1"):
+    with pytest.raises(RepairError, match="pyright validator failed"):
         repair(repo, tmp_path / "state", auto_repair.PAPER_UNIT, "codex")
 
     assert _git(repo, "branch", "--show-current") == "develop"
@@ -203,4 +229,4 @@ def test_gate_failure_rolls_back_branch_and_does_not_restart_paper(
     assert (repo / "src/trader_jev/repair_target.py").read_text(encoding="utf-8") == "VALUE = 1\n"
     assert _git(repo, "status", "--porcelain") == ""
     assert systemctl_calls == [["--user", "is-failed", auto_repair.PAPER_UNIT]]
-    assert len(gate_calls) == 5
+    assert len(gate_calls) == 2

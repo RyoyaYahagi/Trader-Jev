@@ -22,6 +22,7 @@ from trader_jev.forward_paper import ForwardPaperSummary, build_us_instruments
 from trader_jev.jev_usage import JevUsageRecord, summarize_usage
 from trader_jev.models import Action, ExecutionMode, FillEvent, PortfolioState, RiskProfile
 from trader_jev.observability import TradeRecord
+from trader_jev.us_equity import USPaperPortfolio, USUniversePaperStore
 
 NOW = datetime(2026, 9, 22, 13, 30, tzinfo=UTC)
 
@@ -626,8 +627,17 @@ def test_cost_summary_excludes_non_numeric_pricing_fields(tmp_path: Path) -> Non
 
 def test_dashboard_http_endpoints_are_read_only(tmp_path: Path) -> None:
     write_report(tmp_path)
+    universe_db = tmp_path / "universe-paper.sqlite3"
+    USUniversePaperStore(universe_db).save_portfolio(
+        USPaperPortfolio.initial(
+            initial_cash_jpy=Decimal("100000"),
+            usd_jpy_rate=Decimal("150"),
+            cash_reserve_pct=Decimal("0.1"),
+            at=NOW,
+        )
+    )
     try:
-        server = create_server(tmp_path, port=0)
+        server = create_server(tmp_path, port=0, universe_db=universe_db)
     except PermissionError:
         pytest.skip("the managed test sandbox does not permit local socket creation")
     thread = Thread(target=server.serve_forever, daemon=True)
@@ -636,6 +646,11 @@ def test_dashboard_http_endpoints_are_read_only(tmp_path: Path) -> None:
         base = f"http://127.0.0.1:{server.server_port}"
         with urlopen(f"{base}/healthz", timeout=2) as response:
             assert json.loads(response.read()) == {"status": "ok"}
+            assert response.headers["Cache-Control"] == "no-store"
+        with urlopen(f"{base}/api/universe/performance", timeout=2) as response:
+            performance = json.loads(response.read())
+            assert performance["available"] is True
+            assert performance["portfolio_id"] == "us-equities-100k"
             assert response.headers["Cache-Control"] == "no-store"
         with urlopen(f"{base}/api/latest", timeout=2) as response:
             payload = json.loads(response.read())

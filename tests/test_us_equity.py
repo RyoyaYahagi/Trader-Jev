@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import os
+import sqlite3
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
@@ -167,6 +169,30 @@ def test_store_round_trips_universe_portfolio_and_bars(tmp_path: Path) -> None:
     assert restored_bars == cached
     assert future_bars is None
     assert store.load_portfolio(portfolio.portfolio_id) == portfolio
+
+
+def test_store_closes_each_sqlite_connection_after_screen_rows(tmp_path: Path) -> None:
+    store = USUniversePaperStore(tmp_path / "paper.sqlite3")
+    fd_dir = Path("/proc/self/fd")
+    fd_count_before = len(os.listdir(fd_dir)) if fd_dir.is_dir() else None
+
+    for index in range(600):
+        store.record(
+            "screening_results",
+            run_id="large-screen",
+            symbol=f"US.STOCK{index}",
+            payload={"accepted": True},
+        )
+
+    if fd_count_before is not None:
+        assert len(os.listdir(fd_dir)) <= fd_count_before + 4
+    with sqlite3.connect(store.path) as db:
+        assert (
+            db.execute(
+                "SELECT COUNT(*) FROM screening_results WHERE run_id = ?", ("large-screen",)
+            ).fetchone()[0]
+            == 600
+        )
 
 
 def _row(

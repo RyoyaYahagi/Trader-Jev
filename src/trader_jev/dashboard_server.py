@@ -696,6 +696,8 @@ def create_server(
                     )
                 elif request.path == "/api/universe/trades":
                     self._send_json(universe_store.trade_history())
+                elif request.path == "/api/universe/performance":
+                    self._send_json(universe_store.performance())
                 elif request.path == "/api/compare":
                     query = parse_qs(request.query)
                     session_date = query.get("date", [""])[0]
@@ -1095,6 +1097,15 @@ DASHBOARD_HTML = """<!doctype html>
       <div class="kpi"><div class="kpi-label">仮想約定</div><div id="trades-kpi-fills" class="kpi-value">—</div></div>
       <div class="kpi"><div class="kpi-label">保有銘柄</div><div id="trades-kpi-positions" class="kpi-value">—</div></div>
     </div>
+    <div class="page-kpis" aria-label="ユニバースPaperの損益">
+      <div class="kpi"><div class="kpi-label">正味損益（米ドル）</div><div id="universe-net-pnl" class="kpi-value">—</div></div>
+      <div class="kpi"><div class="kpi-label">収益率</div><div id="universe-return" class="kpi-value">—</div></div>
+      <div class="kpi"><div class="kpi-label">資産評価額（米ドル）</div><div id="universe-equity" class="kpi-value">—</div></div>
+      <div class="kpi"><div class="kpi-label">実現損益（米ドル）</div><div id="universe-realized-pnl" class="kpi-value">—</div></div>
+      <div class="kpi"><div class="kpi-label">含み損益（米ドル）</div><div id="universe-unrealized-pnl" class="kpi-value">—</div></div>
+      <div class="kpi"><div class="kpi-label">手数料（米ドル）</div><div id="universe-fees" class="kpi-value">—</div></div>
+    </div>
+    <div id="universe-performance-note" class="note">資産評価記録を読み込んでいます。</div>
     <section class="panel">
       <div class="section-heading"><h2>最近の注文・約定</h2><span id="trades-caption" class="subtle"></span></div>
       <div id="universe-trades-table" class="table-scroll"></div>
@@ -1524,6 +1535,27 @@ function renderUniverseTrades(data) {
   $('universe-trades-table').replaceChildren(table(['日時', '銘柄', '記録種別', '売買', '数量', '価格（米ドル）', '手数料', '通貨', '状態'], rows, message));
   $('trades-caption').textContent = `${integer(rows.length)}件表示 · 注文総数 ${integer(data.order_count || 0)}件 · 約定総数 ${integer(data.fill_count || 0)}件`;
 }
+function renderUniversePerformance(data) {
+  const available = data.available === true;
+  $('universe-net-pnl').textContent = available ? signed(data.net_pnl_usd) : '—';
+  $('universe-return').textContent = available ? percentFromRatio(data.return_ratio) : '—';
+  $('universe-equity').textContent = available ? money(data.equity_usd) : '—';
+  $('universe-realized-pnl').textContent = available ? signed(data.realized_pnl_usd) : '—';
+  $('universe-unrealized-pnl').textContent = available ? signed(data.unrealized_pnl_usd) : '—';
+  $('universe-fees').textContent = available ? money(data.fees_usd) : '—';
+  $('universe-performance-note').textContent = available
+    ? `資産記録 ${formatDateTime(data.updated_at)} · 正味損益は実現損益と含み損益の合計です。収益率は初期円資金を初期換算レートで米ドル換算した額を分母にします。円現金準備分の為替差損益は含みません。資産評価額は現在の米ドル円 ${money(data.usd_jpy_rate)} 円で円現金を換算するため、正味損益とは一致しない場合があります。`
+    : 'まだ資産記録がありません。自動Paper実行が最初のポートフォリオを保存すると、ここに損益が表示されます。';
+}
+async function loadUniversePerformance() {
+  try {
+    const response = await fetch('/api/universe/performance', {cache: 'no-store'});
+    if (!response.ok) throw new Error(response.statusText);
+    renderUniversePerformance(await response.json());
+  } catch (_) {
+    renderUniversePerformance({available: false});
+  }
+}
 async function loadTrades() {
   if (!tradesData) $('universe-trades-table').textContent = '注文・約定記録を読み込んでいます...';
   try {
@@ -1533,6 +1565,7 @@ async function loadTrades() {
   } catch (_) {
     renderUniverseTrades({available: false, order_count: 0, fill_count: 0, position_count: 0, events: []});
   }
+  await loadUniversePerformance();
 }
 function renderAnalysis(data) {
   const rows = (data.analysis_rows || []).map((row) => {

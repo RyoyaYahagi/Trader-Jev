@@ -4,9 +4,13 @@ from __future__ import annotations
 
 import json
 import sqlite3
+from collections.abc import Generator
+from contextlib import contextmanager
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import Any, cast
+
+from trader_jev.us_equity import USPaperPortfolio
 
 
 class UniverseDashboardStore:
@@ -231,13 +235,54 @@ class UniverseDashboardStore:
         except (OSError, sqlite3.Error):
             return empty
 
-    def _connect(self) -> sqlite3.Connection:
+    def performance(self) -> dict[str, Any]:
+        """Return the latest persisted Paper portfolio value and PnL totals."""
+
+        empty: dict[str, Any] = {"available": False}
+        try:
+            with self._connect() as db:
+                row = db.execute(
+                    "SELECT updated_at, payload_json FROM paper_portfolio_state "
+                    "ORDER BY updated_at DESC LIMIT 1"
+                ).fetchone()
+                if row is None:
+                    return empty
+                portfolio = USPaperPortfolio.model_validate_json(str(row[1]))
+                net_pnl = portfolio.realized_pnl_usd + portfolio.unrealized_pnl_usd
+                initial_capital_usd = portfolio.initial_cash_jpy / portfolio.initial_usd_jpy_rate
+                return {
+                    "available": True,
+                    "portfolio_id": portfolio.portfolio_id,
+                    "updated_at": str(row[0]),
+                    "realized_pnl_usd": format(portfolio.realized_pnl_usd, "f"),
+                    "unrealized_pnl_usd": format(portfolio.unrealized_pnl_usd, "f"),
+                    "net_pnl_usd": format(net_pnl, "f"),
+                    "return_ratio": (
+                        format(net_pnl / initial_capital_usd, "f")
+                        if initial_capital_usd > 0
+                        else None
+                    ),
+                    "equity_usd": format(portfolio.total_equity_usd, "f"),
+                    "equity_jpy": format(portfolio.total_equity_jpy, "f"),
+                    "drawdown_jpy": format(portfolio.drawdown_jpy, "f"),
+                    "fees_usd": format(portfolio.total_fees_usd, "f"),
+                    "position_count": len(portfolio.positions),
+                    "usd_jpy_rate": format(portfolio.usd_jpy_rate, "f"),
+                }
+        except (OSError, sqlite3.Error, InvalidOperation, TypeError, ValueError):
+            return empty
+
+    @contextmanager
+    def _connect(self) -> Generator[sqlite3.Connection, None, None]:
         if not self.path.is_file():
             raise OSError("universe database does not exist")
         db = sqlite3.connect(self.path.as_uri() + "?mode=ro", uri=True, timeout=3)
-        db.row_factory = sqlite3.Row
-        db.execute("PRAGMA query_only=ON")
-        return db
+        try:
+            db.row_factory = sqlite3.Row
+            db.execute("PRAGMA query_only=ON")
+            yield db
+        finally:
+            db.close()
 
     @classmethod
     def _has_required_tables(cls, db: sqlite3.Connection) -> bool:

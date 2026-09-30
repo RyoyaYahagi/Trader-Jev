@@ -106,6 +106,28 @@ async def test_dry_run_simulates_through_paper_broker_without_saving_positions(
 
 
 @pytest.mark.asyncio
+async def test_paper_step_accepts_quote_updated_after_scan_started(tmp_path: Path) -> None:
+    config = _config(tmp_path / "paper.sqlite3")
+    clock = _MutableClock(NOW)
+    jev = _FakeJevClient()
+    runner = USUniversePaperRunner(
+        config,
+        USUniversePaperStore(config.database_path),
+        market_source_factory=lambda: _ClockAdvancingMarketSource(clock),
+        jev_client=jev,
+        clock=clock,
+    )
+
+    result = await runner.paper_step(dry_run=True)
+
+    assert result.status == "FILLED"
+    assert result.decision.value == "BUY"
+    assert jev.calls == 1
+    assert jev.requests[0].as_of == NOW + timedelta(seconds=2)
+    assert result.as_of == NOW + timedelta(seconds=2)
+
+
+@pytest.mark.asyncio
 async def test_paper_step_persists_usd_position_and_fx_provenance(tmp_path: Path) -> None:
     config = _config(tmp_path / "paper.sqlite3")
     store = USUniversePaperStore(config.database_path)
@@ -529,6 +551,19 @@ class _FakeMarketSource:
         return {"used_quota": 0, "remain_quota": 100}
 
 
+class _ClockAdvancingMarketSource(_FakeMarketSource):
+    def __init__(self, clock: _MutableClock) -> None:
+        super().__init__()
+        self.clock = clock
+
+    def fetch_snapshots(self, codes: Sequence[str]) -> Mapping[str, USMarketSnapshot]:
+        self.clock.advance(2)
+        updated_at = self.clock.now()
+        return {
+            code: _snapshot(code).model_copy(update={"update_time": updated_at}) for code in codes
+        }
+
+
 class _CountingMarketSource(_FakeMarketSource):
     def __init__(
         self,
@@ -604,6 +639,7 @@ class _UnexpectedMarketSource(_FakeMarketSource):
 class _FakeJevClient:
     def __init__(self) -> None:
         self.calls = 0
+        self.requests: list[Any] = []
 
     async def ask(
         self,
@@ -613,6 +649,7 @@ class _FakeJevClient:
         assert request.symbol == "AAPL"
         assert questions["trade_worthy"]["type"] == "noul"
         self.calls += 1
+        self.requests.append(request)
         return _jev_response()
 
 

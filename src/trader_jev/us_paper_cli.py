@@ -693,7 +693,8 @@ class USUniversePaperRunner:
             if candidate.code not in held and calls >= self.config.jev_candidates:
                 continue
             snapshot = scan.snapshots[candidate.code]
-            if not self._snapshot_fresh(snapshot, scan.as_of):
+            decision_time = self._clock.now()
+            if not self._snapshot_fresh(snapshot, decision_time):
                 self.store.record(
                     "errors",
                     run_id=scan.run_id,
@@ -703,7 +704,7 @@ class USUniversePaperRunner:
                         "error_type": "STALE_QUOTE",
                         "message": "quote is stale",
                     },
-                    recorded_at=scan.as_of,
+                    recorded_at=decision_time,
                 )
                 continue
             request_snapshot = self._decision_snapshot(
@@ -711,7 +712,7 @@ class USUniversePaperRunner:
                 snapshot,
                 scan.features[candidate.code],
                 positions,
-                scan.as_of,
+                decision_time,
             )
             request = JevRequest(
                 snapshot_id=request_snapshot.snapshot_id,
@@ -735,7 +736,7 @@ class USUniversePaperRunner:
                 run_id=scan.run_id,
                 symbol=candidate.code,
                 payload=request,
-                recorded_at=scan.as_of,
+                recorded_at=decision_time,
             )
             try:
                 raw = await self._jev_client.ask(request, _us_jev_questions())
@@ -746,16 +747,17 @@ class USUniversePaperRunner:
                     run_id=scan.run_id,
                     symbol=candidate.code,
                     payload={"stage": "jev", "error_type": type(exc).__name__, "message": str(exc)},
-                    recorded_at=scan.as_of,
+                    recorded_at=self._clock.now(),
                 )
                 continue
+            response_time = self._clock.now()
             opinions[candidate.code] = opinion
             self.store.record(
                 "jev_responses",
                 run_id=scan.run_id,
                 symbol=candidate.code,
                 payload={"opinion": opinion, "raw_response": raw},
-                recorded_at=scan.as_of,
+                recorded_at=response_time,
             )
             proposed = (
                 USDecisionKind.BUY
@@ -775,7 +777,7 @@ class USUniversePaperRunner:
                     "opinion": opinion,
                     "execution": False,
                 },
-                recorded_at=scan.as_of,
+                recorded_at=response_time,
             )
             if candidate.code not in held:
                 calls += 1
@@ -847,6 +849,7 @@ class USUniversePaperRunner:
             opinions: Mapping[str, USJevOpinion] = {}
         else:
             scan, opinions = await self.decide(portfolio_override=portfolio)
+        now = self._clock.now()
         run_id = scan.run_id
         ledger = _restore_ledger(portfolio, at=now)
         snapshots_by_symbol: dict[

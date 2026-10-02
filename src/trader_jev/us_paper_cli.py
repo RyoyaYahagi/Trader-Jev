@@ -95,7 +95,7 @@ class USPaperConfig(DomainModel):
     minute_bar_count: int = Field(default=390, ge=2, le=1000)
     minute_bar_refresh_interval_seconds: int = Field(default=60, gt=0)
     cached_bars_max_age_seconds: int = Field(default=120, ge=0)
-    max_quote_age_seconds: int = Field(default=15, gt=0)
+    max_quote_age_seconds: int = Field(default=30, gt=0)
     decision_interval_seconds: int = Field(default=30, gt=0)
     alpha_quant: Decimal = Field(default=Decimal("0.4"), ge=Decimal("0"), le=Decimal("1"))
     beta_jev: Decimal = Field(default=Decimal("0.6"), ge=Decimal("0"), le=Decimal("1"))
@@ -377,6 +377,7 @@ class USUniversePaperRunner:
         screen = ScreenFetch((), 0, False, 0)
         screen_cache_hit = False
         snapshots: Mapping[str, USMarketSnapshot] = {}
+        snapshots_received_at = now
         bars: Mapping[str, tuple[USOHLCVBar, ...]] = {}
         rejected: Mapping[str, tuple[str, ...]] = {}
         ranked: tuple[USRankedCandidate, ...] = ()
@@ -453,6 +454,7 @@ class USUniversePaperRunner:
                 snapshot_codes = list(dict.fromkeys([*union_codes, *held_codes]))
                 if snapshot_codes:
                     snapshots = market.fetch_snapshots(snapshot_codes)
+                    snapshots_received_at = self._clock.now()
                 source_error_count = len(market.errors)
                 source_errors = tuple(str(error) for error in market.errors)
                 errors.extend(source_errors)
@@ -598,7 +600,7 @@ class USUniversePaperRunner:
                 run_id=run_id,
                 symbol=row.code,
                 payload=snapshot,
-                recorded_at=now,
+                recorded_at=snapshots_received_at,
             )
             self.store.record(
                 "feature_records",
@@ -702,7 +704,10 @@ class USUniversePaperRunner:
                     payload={
                         "stage": "jev",
                         "error_type": "STALE_QUOTE",
-                        "message": "quote is stale",
+                        "message": "market update timestamp exceeds the quote freshness limit",
+                        "quote_update_time": snapshot.update_time,
+                        "observed_age_seconds": stale_seconds(snapshot, decision_time),
+                        "max_age_seconds": self.config.max_quote_age_seconds,
                     },
                     recorded_at=decision_time,
                 )

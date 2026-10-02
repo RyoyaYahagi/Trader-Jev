@@ -128,6 +128,34 @@ async def test_paper_step_accepts_quote_updated_after_scan_started(tmp_path: Pat
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("quote_age_seconds", "expected_status", "expected_jev_calls"),
+    [(30, "FILLED", 1), (31, "NO_TRADE", 0)],
+)
+async def test_paper_step_applies_configured_quote_age_limit(
+    tmp_path: Path,
+    quote_age_seconds: int,
+    expected_status: str,
+    expected_jev_calls: int,
+) -> None:
+    config = _config(tmp_path / "paper.sqlite3")
+    clock = _MutableClock(NOW)
+    jev = _FakeJevClient()
+    runner = USUniversePaperRunner(
+        config,
+        USUniversePaperStore(config.database_path),
+        market_source_factory=lambda: _DelayedQuoteMarketSource(clock, quote_age_seconds),
+        jev_client=jev,
+        clock=clock,
+    )
+
+    result = await runner.paper_step(dry_run=True)
+
+    assert result.status == expected_status
+    assert jev.calls == expected_jev_calls
+
+
+@pytest.mark.asyncio
 async def test_paper_step_persists_usd_position_and_fx_provenance(tmp_path: Path) -> None:
     config = _config(tmp_path / "paper.sqlite3")
     store = USUniversePaperStore(config.database_path)
@@ -562,6 +590,17 @@ class _ClockAdvancingMarketSource(_FakeMarketSource):
         return {
             code: _snapshot(code).model_copy(update={"update_time": updated_at}) for code in codes
         }
+
+
+class _DelayedQuoteMarketSource(_FakeMarketSource):
+    def __init__(self, clock: _MutableClock, delay_seconds: int) -> None:
+        super().__init__()
+        self.clock = clock
+        self.delay_seconds = delay_seconds
+
+    def fetch_snapshots(self, codes: Sequence[str]) -> Mapping[str, USMarketSnapshot]:
+        self.clock.advance(self.delay_seconds)
+        return super().fetch_snapshots(codes)
 
 
 class _CountingMarketSource(_FakeMarketSource):

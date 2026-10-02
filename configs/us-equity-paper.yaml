@@ -20,7 +20,7 @@ jev_candidates: 30
 minute_bar_count: 390
 minute_bar_refresh_interval_seconds: 60
 cached_bars_max_age_seconds: 120
-max_quote_age_seconds: 15
+max_quote_age_seconds: 30
 decision_interval_seconds: 30
 quant_lane_weight: 0.25
 alpha_quant: 0.4

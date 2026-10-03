@@ -568,6 +568,20 @@ def test_dashboard_html_has_overview_sections_without_top_level_mode_selector() 
     assert "Unrealized PnL" not in DASHBOARD_HTML
 
 
+def test_dashboard_html_declares_state_used_by_view_scripts() -> None:
+    script = DASHBOARD_HTML[DASHBOARD_HTML.index("<script>") : DASHBOARD_HTML.index("</script>")]
+
+    # The listing master pager reads this variable before any user input.
+    assert "let masterPage = 0;" in script
+    assert "universeMasterPage" not in script
+    # Views are addressable by URL fragment so reloads keep the selected screen.
+    assert "activateView(viewFromHash());" in script
+    assert 'data-chart-axis="index"' in DASHBOARD_HTML
+    assert 'data-chart-axis="time"' in DASHBOARD_HTML
+    # Background refresh pauses while the tab is hidden.
+    assert "document.visibilityState === 'visible'" in script
+
+
 def test_report_store_aggregates_jev_cost_by_period(tmp_path: Path) -> None:
     record = JevUsageRecord(
         occurred_at=NOW,

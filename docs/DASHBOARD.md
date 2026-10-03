@@ -73,6 +73,16 @@ weekly, and monthly details available on expansion. The complete fill history
 also remains available on expansion.
 The page refreshes the report index every 15 seconds; a running Forward Paper
 session becomes visible after it writes its session report.
+Automatic refresh pauses while the browser tab is hidden and runs again when
+the tab becomes visible.
+
+Each screen has its own URL fragment (`#universe`, `#trades`, `#analysis`), so a
+reload or bookmark reopens the same screen. The comparison table marks the
+better branch for each metric with a dot and colors the difference by whether
+it favors Jev; trade and risk-rejection counts are not marked. The cumulative
+PnL chart overlays both branches and can switch its horizontal axis between
+trade order and close time. The decision funnel bars use a logarithmic scale
+because order and fill counts are much smaller than decision counts.
 
 ダッシュボードには、米国株ユニバースPaper用の「銘柄スクリーニング」
 「自動運用・取引記録」「Jev分析」画面もあります。「自動運用・取引記録」には

@@ -478,8 +478,6 @@ def load_env_file(path: Path) -> dict[str, str]:
         "JEV_API_KEY",
         "JEV_BASE_URL",
         "JEV_ENDPOINT_PATH",
-        "JEV_GATEWAY_TOKEN",
-        "JEV_GATEWAY_URL",
         "JEV_API_KEY_HEADER",
         "JEV_API_KEY_SCHEME",
         "TYPESAFE_API_KEY",

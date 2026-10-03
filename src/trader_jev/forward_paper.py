@@ -420,9 +420,7 @@ class ForwardPaperRunner:
         self._jev_transport: str | None = None
         if self.config.decision_mode is ForwardDecisionMode.JEV:
             client = jev_client or JevHttpClient.from_env()
-            self._jev_transport = (
-                "vercel_ai_gateway_typesafe_sdk" if isinstance(client, JevHttpClient) else "custom"
-            )
+            self._jev_transport = _jev_transport_label(client)
             self._jev_adapter = JevDecisionAdapter(
                 client,
                 config=JevAdapterConfig(
@@ -1273,6 +1271,14 @@ def _decimal_metadata(metadata: Mapping[str, Any], name: str) -> Decimal | None:
     except (InvalidOperation, TypeError, ValueError):
         return None
     return parsed if parsed.is_finite() and parsed > 0 else None
+
+
+def _jev_transport_label(client: object) -> str:
+    if not isinstance(client, JevHttpClient):
+        return "custom"
+    if client.config.transport == "gateway":
+        return "local_jev_gateway"
+    return "vercel_ai_gateway_typesafe_sdk"
 
 
 def _decimal(value: str) -> Decimal:

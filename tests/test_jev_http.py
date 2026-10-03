@@ -2,10 +2,13 @@ from __future__ import annotations
 
 import inspect
 import json
+import socket
 import subprocess
-from collections.abc import Mapping
+import threading
+from collections.abc import Iterator, Mapping
 from datetime import UTC, datetime
 from decimal import Decimal
+from http.server import BaseHTTPRequestHandler, HTTPServer
 from typing import Any
 from uuid import uuid4
 
@@ -14,6 +17,7 @@ from pydantic import SecretStr
 
 from trader_jev.decision import JevDecisionAdapter, JevRequest
 from trader_jev.jev_http import (
+    DEFAULT_JEV_GATEWAY_URL,
     DEFAULT_JEV_SDK_BRIDGE,
     JevHttpClient,
     JevHttpClientConfig,
@@ -275,9 +279,173 @@ async def test_bridge_reports_timeout_without_exposing_command_line_secrets(
     assert "gateway-secret" not in str(error.value)
 
 
+def test_from_env_selects_local_jev_gateway_without_vercel_credential() -> None:
+    client = JevHttpClient.from_env(
+        {
+            "JEV_TRANSPORT": "gateway",
+            "JEV_MODEL": "liquid/d1",
+            "JEV_TIMEOUT_SECONDS": "2.5",
+        }
+    )
+
+    assert client.config.transport == "gateway"
+    assert client.config.jev_gateway_url == DEFAULT_JEV_GATEWAY_URL
+    assert client.config.jev_gateway_token is None
+    assert client.config.gateway_api_key is None
+    assert client.config.model == "jev-gateway"
+    assert client.config.timeout_seconds == 2.5
+
+
+def test_from_env_rejects_unknown_transport() -> None:
+    with pytest.raises(ValueError, match="JEV_TRANSPORT must be vercel or gateway"):
+        JevHttpClient.from_env({"JEV_TRANSPORT": "typesafe-direct"})
+
+
+@pytest.mark.parametrize(
+    ("url", "message"),
+    [
+        ("http://gateway.example.com/v1/systemone", "https unless"),
+        ("https://user:pass@gateway.example.com/v1/systemone", "user credentials"),
+        ("http://127.0.0.1:4789/v1/systemone?token=x", "query or fragment"),
+        ("ftp://127.0.0.1/v1/systemone", "absolute http"),
+    ],
+)
+def test_gateway_url_rejects_unsafe_targets(url: str, message: str) -> None:
+    with pytest.raises(ValueError, match=message):
+        JevHttpClient.from_env({"JEV_TRANSPORT": "gateway", "JEV_GATEWAY_URL": url})
+
+
+@pytest.mark.asyncio
+async def test_gateway_posts_request_without_model_and_normalizes_answers(
+    jev_gateway: _FakeJevGateway,
+) -> None:
+    jev_gateway.response = (200, _native_response())
+    client = JevHttpClient.from_env(
+        {
+            "JEV_TRANSPORT": "gateway",
+            "JEV_GATEWAY_URL": jev_gateway.url,
+            "JEV_GATEWAY_TOKEN": "local-token",
+            "AI_GATEWAY_API_KEY": "vercel-secret",
+        }
+    )
+    request = _request()
+
+    result = await JevDecisionAdapter(client).decide(request)
+
+    assert jev_gateway.path == "/v1/systemone"
+    assert jev_gateway.headers["Authorization"] == "Bearer local-token"
+    assert "vercel-secret" not in json.dumps(jev_gateway.body)
+    assert "model" not in jev_gateway.body
+    assert jev_gateway.body["state"]["request_id"] == str(request.request_id)
+    assert jev_gateway.body["questions"]["action"]["type"] == "choice"
+    assert result.ok
+    assert result.decision is not None
+    assert result.decision.action == "LONG"
+    assert result.decision.model_version == "jev-1.13.0"
+    assert result.audit.response == _native_response()
+
+
+@pytest.mark.asyncio
+async def test_gateway_error_reports_status_and_upstream_reason(
+    jev_gateway: _FakeJevGateway,
+) -> None:
+    jev_gateway.response = (
+        503,
+        {
+            "error": {
+                "code": "secret_store_unavailable",
+                "message": "Jev API key store is unavailable",
+            }
+        },
+    )
+    client = JevHttpClient.from_env(
+        {
+            "JEV_TRANSPORT": "gateway",
+            "JEV_GATEWAY_URL": jev_gateway.url,
+            "JEV_GATEWAY_TOKEN": "never-report-this",
+        }
+    )
+
+    with pytest.raises(JevHttpError, match="status 503") as error:
+        await client.ask(_request(), {"valid": {"type": "noul"}})
+
+    assert "secret_store_unavailable" in str(error.value)
+    assert "never-report-this" not in str(error.value)
+
+
+@pytest.mark.asyncio
+async def test_gateway_rejects_non_object_and_oversized_responses(
+    jev_gateway: _FakeJevGateway,
+) -> None:
+    base = {"JEV_TRANSPORT": "gateway", "JEV_GATEWAY_URL": jev_gateway.url}
+    jev_gateway.response = (200, ["not", "an", "object"])
+    with pytest.raises(JevHttpError, match="must be a JSON object"):
+        await JevHttpClient.from_env(base).ask(_request(), {"valid": {"type": "noul"}})
+
+    jev_gateway.response = (200, _native_response())
+    small = JevHttpClient.from_env({**base, "JEV_MAX_RESPONSE_BYTES": "10"})
+    with pytest.raises(JevHttpError, match="size limit"):
+        await small.ask(_request(), {"valid": {"type": "noul"}})
+
+
+@pytest.mark.asyncio
+async def test_gateway_connection_failure_is_reported() -> None:
+    with socket.socket() as probe:
+        probe.bind(("127.0.0.1", 0))
+        port = probe.getsockname()[1]
+    client = JevHttpClient.from_env(
+        {"JEV_TRANSPORT": "gateway", "JEV_GATEWAY_URL": f"http://127.0.0.1:{port}/v1/systemone"}
+    )
+
+    with pytest.raises(JevHttpError, match="jev-gateway request failed: URLError"):
+        await client.ask(_request(), {"valid": {"type": "noul"}})
+
+
 def test_http_client_async_methods_remain_compatible() -> None:
     assert inspect.iscoroutinefunction(JevHttpClient.decide)
     assert inspect.iscoroutinefunction(JevHttpClient.ask)
+
+
+class _FakeJevGateway:
+    def __init__(self) -> None:
+        self.response: tuple[int, Any] = (200, {})
+        self.path = ""
+        self.headers: dict[str, str] = {}
+        self.body: dict[str, Any] = {}
+        self.url = ""
+
+
+@pytest.fixture
+def jev_gateway() -> Iterator[_FakeJevGateway]:
+    state = _FakeJevGateway()
+
+    class Handler(BaseHTTPRequestHandler):
+        def do_POST(self) -> None:
+            length = int(self.headers.get("Content-Length", "0"))
+            state.path = self.path
+            state.headers = dict(self.headers.items())
+            state.body = json.loads(self.rfile.read(length))
+            status, payload = state.response
+            encoded = json.dumps(payload).encode("utf-8")
+            self.send_response(status)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(encoded)))
+            self.end_headers()
+            self.wfile.write(encoded)
+
+        def log_message(self, format: str, *args: Any) -> None:
+            del format, args
+
+    server = HTTPServer(("127.0.0.1", 0), Handler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    state.url = f"http://127.0.0.1:{server.server_port}/v1/systemone"
+    try:
+        yield state
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join()
 
 
 def _request() -> JevRequest:

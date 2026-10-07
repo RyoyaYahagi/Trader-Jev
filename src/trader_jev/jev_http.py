@@ -1,8 +1,14 @@
-"""Environment-configured TypeSafe SDK transport for Jev decisions.
+"""Environment-configured TypeSafe System One transports for Jev decisions.
 
-The official TypeScript SDK runs in a private Node.js bridge. This module sends
-the request to that bridge and leaves the native TypeSafe response available to
-the existing, transport-neutral decision adapter.
+Two transports are supported:
+
+* ``vercel``: the official TypeScript SDK runs in a private Node.js bridge and
+  calls Vercel AI Gateway.
+* ``gateway``: the request is posted to the local ``jev-gateway`` service, which
+  holds the TypeSafe credential and forwards the request to TypeSafe.
+
+Both leave the native TypeSafe response available to the existing,
+transport-neutral decision adapter.
 """
 
 from __future__ import annotations
@@ -13,16 +19,26 @@ import os
 import subprocess
 from collections.abc import Mapping
 from decimal import Decimal, InvalidOperation
+from ipaddress import ip_address
 from pathlib import Path
 from time import monotonic
-from typing import Any, cast
+from typing import Any, Literal, cast
+from urllib.error import HTTPError, URLError
+from urllib.parse import urlsplit
+from urllib.request import Request
 
-from pydantic import Field, SecretStr, model_validator
+from pydantic import Field, SecretStr, field_validator, model_validator
 
 from trader_jev.decision import TYPESAFE_NATIVE_RESPONSE_KEY, JevDecision, JevRequest
+from trader_jev.http_security import safe_urlopen
 from trader_jev.models import DomainModel
 
 DEFAULT_JEV_SDK_BRIDGE = Path(__file__).resolve().parents[2] / "jev-sdk" / "dist" / "bridge.js"
+DEFAULT_JEV_GATEWAY_URL = "http://127.0.0.1:4789/v1/systemone"
+JEV_GATEWAY_MODEL_LABEL = "jev-gateway"
+_MAX_ERROR_DETAIL_CHARS = 200
+
+JevTransport = Literal["vercel", "gateway"]
 
 
 class JevHttpError(RuntimeError):
@@ -30,29 +46,48 @@ class JevHttpError(RuntimeError):
 
 
 class JevHttpClientConfig(DomainModel):
-    """Vercel AI Gateway settings for :class:`JevHttpClient`.
+    """Transport settings for :class:`JevHttpClient`.
 
     ``gateway_api_key`` is kept secret in model representations and passed only
-    to the private Node.js SDK process.
+    to the private Node.js SDK process. ``jev_gateway_token`` is sent only to
+    ``jev_gateway_url``.
     """
 
+    transport: JevTransport = "vercel"
     gateway_api_key: SecretStr | None = Field(default=None, repr=False)
+    jev_gateway_url: str = Field(default=DEFAULT_JEV_GATEWAY_URL, min_length=1)
+    jev_gateway_token: SecretStr | None = Field(default=None, repr=False)
     model: str = Field(default="jev-latest", min_length=1)
     timeout_seconds: float = Field(default=5.0, gt=0)
     max_response_bytes: int = Field(default=65_536, gt=0)
 
+    @field_validator("jev_gateway_url")
+    @classmethod
+    def validate_jev_gateway_url(cls, value: str) -> str:
+        parsed = urlsplit(value)
+        scheme = parsed.scheme.lower()
+        if scheme not in {"http", "https"} or not parsed.hostname:
+            raise ValueError("JEV_GATEWAY_URL must be an absolute http(s) URL")
+        if parsed.username is not None or parsed.password is not None:
+            raise ValueError("JEV_GATEWAY_URL must not contain user credentials")
+        if parsed.query or parsed.fragment:
+            raise ValueError("JEV_GATEWAY_URL must not contain a query or fragment")
+        if scheme == "http" and not _is_loopback_host(parsed.hostname):
+            raise ValueError("JEV_GATEWAY_URL must use https unless it targets a loopback host")
+        return value
+
     @model_validator(mode="after")
     def validate_authentication(self) -> JevHttpClientConfig:
-        if self.gateway_api_key is None:
+        if self.transport == "vercel" and self.gateway_api_key is None:
             raise ValueError("AI_GATEWAY_API_KEY (or VERCEL_OIDC_TOKEN) is required")
         return self
 
 
 class JevHttpClient:
-    """Async TypeSafe System One client using the official SDK via Node.js.
+    """Async TypeSafe System One client.
 
-    The SDK invocation runs in a worker thread so existing Python callers keep
-    their async interface. Retries are disabled in the SDK bridge to retain the
+    Blocking transport calls run in a worker thread so existing Python callers
+    keep their async interface. Neither transport retries, which retains the
     application's fail-closed timing behavior.
     """
 
@@ -61,9 +96,33 @@ class JevHttpClient:
 
     @classmethod
     def from_env(cls, env: Mapping[str, str] | None = None) -> JevHttpClient:
-        """Build a client for Vercel AI Gateway from server-side environment values."""
+        """Build a client from server-side environment values.
+
+        ``JEV_TRANSPORT=gateway`` selects the local ``jev-gateway`` service. The
+        gateway applies its own configured TypeSafe model, so ``JEV_MODEL`` is
+        not used in that mode. Any other value, or no value, keeps Vercel AI
+        Gateway.
+        """
 
         values: Mapping[str, str] = os.environ if env is None else env
+        transport = values.get("JEV_TRANSPORT", "vercel").strip().lower() or "vercel"
+        if transport not in {"vercel", "gateway"}:
+            raise ValueError("JEV_TRANSPORT must be vercel or gateway")
+        timeout_seconds = _float_env(values, "JEV_TIMEOUT_SECONDS", 5.0)
+        max_response_bytes = _int_env(values, "JEV_MAX_RESPONSE_BYTES", 65_536)
+        if transport == "gateway":
+            gateway_url = values.get("JEV_GATEWAY_URL", "").strip() or DEFAULT_JEV_GATEWAY_URL
+            gateway_token = values.get("JEV_GATEWAY_TOKEN", "").strip()
+            return cls(
+                JevHttpClientConfig(
+                    transport="gateway",
+                    jev_gateway_url=gateway_url,
+                    jev_gateway_token=SecretStr(gateway_token) if gateway_token else None,
+                    model=JEV_GATEWAY_MODEL_LABEL,
+                    timeout_seconds=timeout_seconds,
+                    max_response_bytes=max_response_bytes,
+                )
+            )
         api_key = values.get("AI_GATEWAY_API_KEY", "").strip()
         if not api_key:
             api_key = values.get("VERCEL_OIDC_TOKEN", "").strip()
@@ -73,8 +132,8 @@ class JevHttpClient:
             JevHttpClientConfig(
                 gateway_api_key=SecretStr(api_key),
                 model=values.get("JEV_MODEL", "jev-latest"),
-                timeout_seconds=_float_env(values, "JEV_TIMEOUT_SECONDS", 5.0),
-                max_response_bytes=_int_env(values, "JEV_MAX_RESPONSE_BYTES", 65_536),
+                timeout_seconds=timeout_seconds,
+                max_response_bytes=max_response_bytes,
             )
         )
 
@@ -82,7 +141,7 @@ class JevHttpClient:
         """Send one request to TypeSafe and normalize its typed answers."""
 
         started = monotonic()
-        raw = await asyncio.to_thread(self._call_sdk, self._typesafe_request(request))
+        raw = await asyncio.to_thread(self._call, self._typesafe_request(request))
         normalized = _normalize_typesafe_response(raw, request, self.config.model)
         normalized["latency_ms"] = int((monotonic() - started) * 1000)
         normalized[TYPESAFE_NATIVE_RESPONSE_KEY] = dict(raw)
@@ -100,7 +159,7 @@ class JevHttpClient:
         """
 
         return await asyncio.to_thread(
-            self._call_sdk, self._typesafe_request(request, questions=questions)
+            self._call, self._typesafe_request(request, questions=questions)
         )
 
     def _typesafe_request(
@@ -120,11 +179,53 @@ class JevHttpClient:
                 "input_schema_version": request.input_schema_version,
             }
         )
-        return {
+        body: dict[str, Any] = {
             "state": state,
-            "model": self.config.model,
             "questions": _typesafe_questions() if questions is None else dict(questions),
         }
+        if self.config.transport == "vercel":
+            body["model"] = self.config.model
+        return body
+
+    def _call(self, body: Mapping[str, Any]) -> Mapping[str, Any]:
+        if self.config.transport == "gateway":
+            return self._call_gateway(body)
+        return self._call_sdk(body)
+
+    def _call_gateway(self, body: Mapping[str, Any]) -> Mapping[str, Any]:
+        """POST the System One request to the local jev-gateway service."""
+
+        headers = {
+            "Accept": "application/json",
+            "Content-Type": "application/json",
+            "User-Agent": "trader-jev/0.1",
+        }
+        if self.config.jev_gateway_token is not None:
+            headers["Authorization"] = f"Bearer {self.config.jev_gateway_token.get_secret_value()}"
+        request = Request(
+            self.config.jev_gateway_url,
+            data=json.dumps(body, ensure_ascii=False, separators=(",", ":")).encode("utf-8"),
+            headers=headers,
+            method="POST",
+        )
+        try:
+            with safe_urlopen(request, timeout=self.config.timeout_seconds) as response:
+                encoded = response.read(self.config.max_response_bytes + 1)
+        except HTTPError as exc:
+            raise JevHttpError(
+                f"jev-gateway request failed with status {exc.code}{_gateway_error_detail(exc)}"
+            ) from exc
+        except (URLError, TimeoutError, OSError) as exc:
+            raise JevHttpError(f"jev-gateway request failed: {type(exc).__name__}") from exc
+        if len(encoded) > self.config.max_response_bytes:
+            raise JevHttpError("Jev response exceeded the configured size limit")
+        try:
+            decoded: Any = json.loads(encoded.decode("utf-8"))
+        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+            raise JevHttpError("jev-gateway returned invalid JSON") from exc
+        if not isinstance(decoded, Mapping):
+            raise JevHttpError("TypeSafe response must be a JSON object")
+        return cast(Mapping[str, Any], decoded)
 
     def _call_sdk(self, body: Mapping[str, Any]) -> Mapping[str, Any]:
         """Invoke the Node.js bridge without placing credentials in arguments or input."""
@@ -176,6 +277,35 @@ class JevHttpClient:
         if not isinstance(decoded, Mapping):
             raise JevHttpError("TypeSafe response must be a JSON object")
         return cast(Mapping[str, Any], decoded)
+
+
+def _is_loopback_host(host: str) -> bool:
+    if host.lower() == "localhost":
+        return True
+    try:
+        return ip_address(host).is_loopback
+    except ValueError:
+        return False
+
+
+def _gateway_error_detail(error: HTTPError) -> str:
+    """Return the gateway or TypeSafe error code and message, without the body."""
+
+    try:
+        decoded: Any = json.loads(error.read(4096).decode("utf-8"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+        return ""
+    if not isinstance(decoded, Mapping):
+        return ""
+    payload = cast(Mapping[str, Any], decoded).get("error", decoded)
+    if isinstance(payload, str):
+        return f": {payload[:_MAX_ERROR_DETAIL_CHARS]}"
+    if not isinstance(payload, Mapping):
+        return ""
+    fields = cast(Mapping[str, Any], payload)
+    parts = [str(fields[key]) for key in ("code", "message") if fields.get(key)]
+    detail = " ".join(parts)[:_MAX_ERROR_DETAIL_CHARS]
+    return f" ({detail})" if detail else ""
 
 
 def _typesafe_questions() -> dict[str, dict[str, Any]]:

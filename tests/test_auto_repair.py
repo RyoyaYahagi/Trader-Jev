@@ -691,6 +691,8 @@ def test_failed_gate_feedback_reuses_persistent_worktree(
     gate_count = 0
 
     def fake_codex(command: Sequence[str], *, cwd: Path, prompt: str, **_kwargs: object) -> str:
+        assert command[command.index("--model") + 1] == "gpt-6-luna"
+        assert command[command.index("--config") + 1] == 'model_reasoning_effort="xhigh"'
         codex_calls.append((cwd, prompt))
         (cwd / "src/trader_jev/repair_target.py").write_text(
             f"VALUE = {len(codex_calls) + 1}\n", encoding="utf-8"

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 from collections.abc import Mapping, Sequence
 from datetime import datetime, timedelta
@@ -103,6 +104,56 @@ async def test_dry_run_simulates_through_paper_broker_without_saving_positions(
     assert paper_portfolio.fx_source == "test FX source"
     assert store.load_portfolio(config.portfolio_id) is None
     assert jev.calls == 1
+
+
+@pytest.mark.asyncio
+async def test_paper_step_accepts_quote_updated_after_scan_started(tmp_path: Path) -> None:
+    config = _config(tmp_path / "paper.sqlite3")
+    clock = _MutableClock(NOW)
+    jev = _FakeJevClient()
+    runner = USUniversePaperRunner(
+        config,
+        USUniversePaperStore(config.database_path),
+        market_source_factory=lambda: _ClockAdvancingMarketSource(clock),
+        jev_client=jev,
+        clock=clock,
+    )
+
+    result = await runner.paper_step(dry_run=True)
+
+    assert result.status == "FILLED"
+    assert result.decision.value == "BUY"
+    assert jev.calls == 1
+    assert jev.requests[0].as_of == NOW + timedelta(seconds=2)
+    assert result.as_of == NOW + timedelta(seconds=4)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("quote_age_seconds", "expected_status", "expected_jev_calls"),
+    [(30, "FILLED", 1), (31, "NO_TRADE", 0)],
+)
+async def test_paper_step_applies_configured_quote_age_limit(
+    tmp_path: Path,
+    quote_age_seconds: int,
+    expected_status: str,
+    expected_jev_calls: int,
+) -> None:
+    config = _config(tmp_path / "paper.sqlite3").model_copy(update={"max_jev_age_seconds": 60})
+    clock = _MutableClock(NOW)
+    jev = _FakeJevClient()
+    runner = USUniversePaperRunner(
+        config,
+        USUniversePaperStore(config.database_path),
+        market_source_factory=lambda: _DelayedQuoteMarketSource(clock, quote_age_seconds),
+        jev_client=jev,
+        clock=clock,
+    )
+
+    result = await runner.paper_step(dry_run=True)
+
+    assert result.status == expected_status
+    assert jev.calls == expected_jev_calls
 
 
 @pytest.mark.asyncio
@@ -529,6 +580,35 @@ class _FakeMarketSource:
         return {"used_quota": 0, "remain_quota": 100}
 
 
+class _ClockAdvancingMarketSource(_FakeMarketSource):
+    def __init__(self, clock: _MutableClock) -> None:
+        super().__init__()
+        self.clock = clock
+
+    def fetch_snapshots(self, codes: Sequence[str]) -> Mapping[str, USMarketSnapshot]:
+        self.clock.advance(2)
+        updated_at = self.clock.now()
+        return {
+            code: _snapshot(code).model_copy(update={"update_time": updated_at}) for code in codes
+        }
+
+
+class _DelayedQuoteMarketSource(_FakeMarketSource):
+    def __init__(self, clock: _MutableClock, delay_seconds: int) -> None:
+        super().__init__()
+        self.clock = clock
+        self.delay_seconds = delay_seconds
+
+    def fetch_snapshots(self, codes: Sequence[str]) -> Mapping[str, USMarketSnapshot]:
+        self.clock.advance(self.delay_seconds)
+        return {
+            code: _snapshot(code).model_copy(
+                update={"update_time": self.clock.now() - timedelta(seconds=self.delay_seconds)}
+            )
+            for code in codes
+        }
+
+
 class _CountingMarketSource(_FakeMarketSource):
     def __init__(
         self,
@@ -604,6 +684,7 @@ class _UnexpectedMarketSource(_FakeMarketSource):
 class _FakeJevClient:
     def __init__(self) -> None:
         self.calls = 0
+        self.requests: list[Any] = []
 
     async def ask(
         self,
@@ -613,6 +694,7 @@ class _FakeJevClient:
         assert request.symbol == "AAPL"
         assert questions["trade_worthy"]["type"] == "noul"
         self.calls += 1
+        self.requests.append(request)
         return _jev_response()
 
 
@@ -631,14 +713,16 @@ def _jev_response(*, noul_confidence: bool = False) -> dict[str, Any]:
             },
             "trend_quality": {
                 "type": "score",
-                "score": 0.9,
-                "probabilities": {"0.9": 0.8, "0.5": 0.2},
+                "score": 1.8,
+                "legend": {"0": "weak", "1": "mixed", "2": "strong"},
+                "probabilities": {"0": 0.0, "1": 0.2, "2": 0.8},
                 "confidence": 0.8,
             },
             "continuation_quality": {
                 "type": "score",
-                "score": 0.9,
-                "probabilities": {"0.9": 0.8, "0.5": 0.2},
+                "score": 1.8,
+                "legend": {"0": "weak", "1": "mixed", "2": "strong"},
+                "probabilities": {"0": 0.0, "1": 0.2, "2": 0.8},
                 "confidence": 0.82,
             },
             "abnormal_activity": {"type": "noul", "noul": 0.1},
@@ -681,3 +765,287 @@ def _snapshot(code: str) -> USMarketSnapshot:
         bid_volume=Decimal("100"),
         ask_volume=Decimal("100"),
     )
+
+
+def test_native_three_level_scores_are_normalized() -> None:
+    response = _jev_response()
+    for key in ("trend_quality", "continuation_quality"):
+        response["answers"][key].update(
+            score=1.8,
+            legend={"0": "weak", "1": "mixed", "2": "strong"},
+            probabilities={"0": 0.0, "1": 0.2, "2": 0.8},
+        )
+    opinion = parse_jev_opinion(response)
+    assert opinion.trend_quality == Decimal("0.9")
+    assert opinion.continuation_quality == Decimal("0.9")
+    assert opinion.raw_response["answers"]["trend_quality"]["score"] == 1.8
+
+
+@pytest.mark.asyncio
+async def test_quotes_are_refreshed_after_jev_before_execution(tmp_path: Path) -> None:
+    clock = _MutableClock(NOW)
+    source = _ClockAdvancingMarketSource(clock)
+
+    class SlowJev(_FakeJevClient):
+        async def ask(
+            self, request: Any, questions: Mapping[str, Mapping[str, Any]]
+        ) -> Mapping[str, Any]:
+            clock.advance(10)
+            return await super().ask(request, questions)
+
+    config = _config(tmp_path / "paper.sqlite3")
+    runner = USUniversePaperRunner(
+        config,
+        USUniversePaperStore(config.database_path),
+        market_source_factory=lambda: source,
+        jev_client=SlowJev(),
+        clock=clock,
+    )
+    result = await runner.paper_step(dry_run=True)
+    assert result.status == "FILLED"
+    assert result.as_of == NOW + timedelta(seconds=14)
+
+
+@pytest.mark.asyncio
+async def test_persistent_invalid_responses_fail_the_runtime(tmp_path: Path) -> None:
+    class InvalidJev(_FakeJevClient):
+        async def ask(
+            self, request: Any, questions: Mapping[str, Mapping[str, Any]]
+        ) -> Mapping[str, Any]:
+            return {"answers": {}}
+
+    config = _config(tmp_path / "paper.sqlite3")
+    runner = USUniversePaperRunner(
+        config,
+        USUniversePaperStore(config.database_path),
+        market_source_factory=_market_factory,
+        jev_client=InvalidJev(),
+        clock=FixedClock(NOW),
+    )
+
+    async def no_sleep(_seconds: float) -> None:
+        return None
+
+    with pytest.raises(RuntimeError, match="unhealthy"):
+        await runner.paper_run(steps=3, dry_run=True, sleep=no_sleep)
+
+
+@pytest.mark.parametrize("raw_score", ["-0.1", "2.1", "NaN", "Infinity"])
+def test_score_rejects_values_outside_native_rubric(raw_score: str) -> None:
+    response = _jev_response()
+    response["answers"]["trend_quality"]["score"] = raw_score
+    with pytest.raises(ValueError, match="between zero and two"):
+        parse_jev_opinion(response)
+
+
+def test_score_requires_matching_legend() -> None:
+    response = _jev_response()
+    response["answers"]["trend_quality"]["legend"] = {"0": "weak", "1": "strong"}
+    with pytest.raises(ValueError, match="legend"):
+        parse_jev_opinion(response)
+
+
+@pytest.mark.asyncio
+async def test_expired_opinion_cannot_trade_with_refreshed_quote(tmp_path: Path) -> None:
+    clock = _MutableClock(NOW)
+    source = _ClockAdvancingMarketSource(clock)
+
+    class ExpiredJev(_FakeJevClient):
+        async def ask(
+            self, request: Any, questions: Mapping[str, Mapping[str, Any]]
+        ) -> Mapping[str, Any]:
+            clock.advance(31)
+            return await super().ask(request, questions)
+
+    config = _config(tmp_path / "paper.sqlite3")
+    store = USUniversePaperStore(config.database_path)
+    runner = USUniversePaperRunner(
+        config,
+        store,
+        market_source_factory=lambda: source,
+        jev_client=ExpiredJev(),
+        clock=clock,
+    )
+    result = await runner.paper_step(dry_run=True)
+    assert result.status == "NO_TRADE"
+    assert result.scan is not None
+    assert result.scan.health["opinion_expired"] == 1
+    assert store.load_portfolio(config.portfolio_id) is None
+
+
+@pytest.mark.asyncio
+async def test_refresh_failure_never_falls_back_to_scan_quote(tmp_path: Path) -> None:
+    class RefreshFailure(_FakeMarketSource):
+        calls = 0
+
+        def fetch_snapshots(self, codes: Sequence[str]) -> Mapping[str, USMarketSnapshot]:
+            self.calls += 1
+            if self.calls > 1:
+                raise USMoomooError("NETWORK", "refresh unavailable")
+            return super().fetch_snapshots(codes)
+
+    source = RefreshFailure()
+    config = _config(tmp_path / "paper.sqlite3")
+    runner = USUniversePaperRunner(
+        config,
+        USUniversePaperStore(config.database_path),
+        market_source_factory=lambda: source,
+        jev_client=_FakeJevClient(),
+        clock=FixedClock(NOW),
+    )
+    result = await runner.paper_step(dry_run=True)
+    assert result.status == "NO_TRADE"
+    assert result.scan is not None
+    assert result.scan.health["execution_quote_error"] == 1
+
+
+@pytest.mark.asyncio
+async def test_normal_confidence_rejection_does_not_fail_runtime(tmp_path: Path) -> None:
+    class UncertainJev(_FakeJevClient):
+        async def ask(
+            self, request: Any, questions: Mapping[str, Mapping[str, Any]]
+        ) -> Mapping[str, Any]:
+            response = _jev_response()
+            response["answers"]["trend_quality"]["confidence"] = 0.1
+            return response
+
+    config = _config(tmp_path / "paper.sqlite3")
+    runner = USUniversePaperRunner(
+        config,
+        USUniversePaperStore(config.database_path),
+        market_source_factory=_market_factory,
+        jev_client=UncertainJev(),
+        clock=FixedClock(NOW),
+    )
+
+    async def no_sleep(_seconds: float) -> None:
+        return None
+
+    results = await runner.paper_run(steps=4, dry_run=True, sleep=no_sleep)
+    assert isinstance(results, tuple)
+    assert all(r.status == "NO_TRADE" for r in results)
+    assert all(r.scan is not None and r.scan.health["threshold_rejected"] == 1 for r in results)
+
+
+@pytest.mark.asyncio
+async def test_jev_concurrency_is_bounded(tmp_path: Path) -> None:
+    config = _config(tmp_path / "paper.sqlite3").model_copy(
+        update={
+            "union_limit": 4,
+            "jev_candidates": 4,
+            "jev_concurrency": 2,
+        }
+    )
+    active = 0
+    peak = 0
+
+    class ConcurrentJev(_FakeJevClient):
+        async def ask(
+            self, request: Any, questions: Mapping[str, Mapping[str, Any]]
+        ) -> Mapping[str, Any]:
+            nonlocal active, peak
+            active += 1
+            peak = max(peak, active)
+            await asyncio.sleep(0)
+            active -= 1
+            return _jev_response()
+
+    runner = USUniversePaperRunner(
+        config,
+        USUniversePaperStore(config.database_path),
+        market_source_factory=_market_factory,
+        jev_client=ConcurrentJev(),
+        clock=FixedClock(NOW),
+    )
+    base = runner.scan()
+    candidate = base.candidates[0]
+    codes = [f"US.TEST{i}" for i in range(4)]
+    scan = base.model_copy(
+        update={
+            "candidates": tuple(
+                candidate.model_copy(update={"code": code, "quant_rank": i + 1})
+                for i, code in enumerate(codes)
+            ),
+            "snapshots": {
+                code: base.snapshots[CODE].model_copy(update={"code": code}) for code in codes
+            },
+            "features": {
+                code: base.features[CODE].model_copy(update={"code": code}) for code in codes
+            },
+        }
+    )
+    runner.scan = lambda: scan
+    decided, opinions = await runner.decide()
+    assert peak == 2
+    assert len(opinions) == 4
+    assert decided.health["jev_succeeded"] == 4
+
+
+@pytest.mark.asyncio
+async def test_successful_step_resets_consecutive_failure_count(tmp_path: Path) -> None:
+    class IntermittentJev(_FakeJevClient):
+        async def ask(
+            self, request: Any, questions: Mapping[str, Mapping[str, Any]]
+        ) -> Mapping[str, Any]:
+            self.calls += 1
+            return _jev_response() if self.calls == 3 else {"answers": {}}
+
+    config = _config(tmp_path / "paper.sqlite3")
+    runner = USUniversePaperRunner(
+        config,
+        USUniversePaperStore(config.database_path),
+        market_source_factory=_market_factory,
+        jev_client=IntermittentJev(),
+        clock=FixedClock(NOW),
+    )
+
+    async def no_sleep(_seconds: float) -> None:
+        return None
+
+    results = await runner.paper_run(steps=5, dry_run=True, sleep=no_sleep)
+    assert isinstance(results, tuple)
+    assert len(results) == 5
+    assert results[2].status == "FILLED"
+
+
+@pytest.mark.asyncio
+async def test_expired_jev_does_not_block_timed_exit(tmp_path: Path) -> None:
+    clock = _MutableClock(NOW)
+    source = _ClockAdvancingMarketSource(clock)
+
+    class SlowJev(_FakeJevClient):
+        async def ask(
+            self, request: Any, questions: Mapping[str, Mapping[str, Any]]
+        ) -> Mapping[str, Any]:
+            clock.advance(31)
+            return await super().ask(request, questions)
+
+    config = _config(tmp_path / "paper.sqlite3")
+    store = USUniversePaperStore(config.database_path)
+    portfolio = USPaperPortfolio.initial(
+        portfolio_id=config.portfolio_id,
+        initial_cash_jpy=Decimal("100000"),
+        usd_jpy_rate=Decimal("150"),
+        cash_reserve_pct=Decimal("0.1"),
+        at=NOW,
+    ).model_copy(
+        update={
+            "positions": {"AAPL": 1},
+            "average_prices_usd": {"AAPL": Decimal("20")},
+            "market_prices_usd": {"AAPL": Decimal("20")},
+            "position_entry_times": {"AAPL": NOW - timedelta(seconds=901)},
+        }
+    )
+    store.save_portfolio(portfolio)
+    runner = USUniversePaperRunner(
+        config,
+        store,
+        market_source_factory=lambda: source,
+        jev_client=SlowJev(),
+        clock=clock,
+    )
+    result = await runner.paper_step(dry_run=True)
+    assert result.status == "FILLED"
+    assert result.decision is USDecisionKind.SELL
+    assert result.scan is not None
+    assert result.scan.health["opinion_expired"] == 1

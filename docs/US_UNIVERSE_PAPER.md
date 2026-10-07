@@ -14,6 +14,7 @@ moomooのQuoteContextだけを使います。取引、口座、注文、実ポ�
 - スクリーナー最大2,000行。momentum / breakout / reversal / liquid の各laneで上位50銘柄を選び、重複を除いて最大200銘柄を残す。
 - 候補上位30銘柄と保有銘柄だけ、必要なときに1分足を購読する。購読は`paper-run`中に維持し、銘柄ごとの足データ取得は既定60秒ごとです。候補から外れた銘柄の購読を解除します。購読枠が足りないときは残っているスクリーナー・snapshot情報で評価し、取得できない特徴量はnullのまま保存します。
 - Jev対象は最大30銘柄。量的スコアとJevスコアの合成比率、信頼度・異常確率のゲートはYAMLで調整できる。
+- 株価更新時刻に基づく鮮度上限は既定30秒。Jev判断の間隔と同じ上限を使い、上限を超えた値は新規注文候補にしない。
 - 初期資金は10万円。JPY現金を10%確保し、残りをPaperBroker用USD現金として扱う。銘柄ごとの上限は資産の30%、保有上限は3銘柄。
 - 米国東部時間の通常取引時間だけ注文候補を評価する。週末、米国休場日、早引けを`NasdaqCalendar`で扱う。
 - 初期損切り2%、利確3%、最大保有15分。Paper約定費用はmoomoo US Basic、スリッページ10 bps。
@@ -58,3 +59,15 @@ Jevには選択型のセットアップ分類、0〜1のトレンド・継続ス
 - AdapterはSDK固有のDataFrameや値を正規化し、coreにはmarket-neutralモデルだけを返します。
 
 詳細と制限は[Moomoo公式 Stock Screener V2](https://openapi.moomoo.com/moomoo-api-doc/en/quote/get-stock-screen.html)、[基本銘柄情報](https://openapi.moomoo.com/moomoo-api-doc/en/quote/get-static-info.html)、[market snapshot](https://openapi.moomoo.com/moomoo-api-doc/en/quote/get-market-snapshot.html)、[リアルタイムKline](https://openapi.moomoo.com/moomoo-api-doc/en/quote/get-kl.html)、[購読管理](https://openapi.moomoo.com/moomoo-api-doc/en/quote/sub.html)を参照してください。
+
+## Jev応答と運用状態の検証
+
+Scoreの3段階評価は、TypeSafeのネイティブな0〜2の値を2で割り、0〜1に正規化します。`legend`は要求した3段階と一致することを検証します。ネイティブ応答と正規化済みのopinionを保存し、形式不正の応答も`parse_error`付きで保存します。評価基準は数値ラベルではなく、価格方向・出来高・押し戻しの具体的な状態を記述します。仕様は[TypeSafe Score](https://docs.typesafe.ai/primitives/score)を参照してください。
+
+Jev対象は`jev_concurrency`（既定5）件まで同時に評価します。銘柄マスターは各scanで読み込んだものを判断時にも使い、銘柄ごとの全件再読込を避けます。判断後にopinionのある銘柄と保有銘柄の価格を再取得します。取得失敗時は元の価格に戻しません。更新後の価格で鮮度・スプレッド・RiskEngineを確認します。Jev判断は入力価格の時刻から`max_jev_age_seconds`（既定30秒）以内だけ新規注文に使用します。判断期限切れでも、保有銘柄の価格が正常なら価格・時間による決済を評価できます。
+
+`decisions`には`kind=runtime_health`として、要求・正常応答・応答形式不正・通信失敗・価格期限切れ・条件未達・判断期限切れ・実行価格更新失敗の件数を記録します。有効期限内の正常応答の割合、または更新後に利用可能な価格の割合が`min_jev_success_ratio`（既定0.5）未満なら運用障害です。候補があるのに評価できない場合や、scanエラーで候補を作れない場合も障害にします。一部銘柄の価格欠損だけで全体を障害にしません。これが`consecutive_unhealthy_steps`（既定3）回続くと`paper-run`は異常終了し、既存のsystemd監視と自動修復へ渡します。通常の信頼度不足やセットアップなしは運用障害にしません。
+
+信頼度下限0.55、売買適性、異常確率、資金・RiskEngine条件は維持します。ダッシュボードには各段階の信頼度と具体的な見送り理由を返します。信頼度下限の変更は、正規化修正後の応答を収集し、別期間のPaper結果で検証してから行います。約定0件だけを障害と判定しません。
+
+ローカル運用修正はGateway対応コミット`270b44e`を依存元とします。GitHubの運用修正PRはダッシュボード修正PRの上に積み、未公開のGateway対応・価格鮮度修正・自動修復モデル固定も含めます。既存UIを維持し、ダッシュボードPR統合後はdevelopへリベースします。

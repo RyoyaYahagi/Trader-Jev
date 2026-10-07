@@ -25,7 +25,7 @@ from trader_jev.decision import JevRequest
 from trader_jev.execution import ExecutionConfig, PaperBroker
 from trader_jev.fees import MoomooFeeSchedule
 from trader_jev.interfaces import Clock
-from trader_jev.jev_http import JevHttpClient
+from trader_jev.jev_http import JevHttpClient, JevHttpError
 from trader_jev.models import (
     Action,
     DataQuality,
@@ -95,8 +95,12 @@ class USPaperConfig(DomainModel):
     minute_bar_count: int = Field(default=390, ge=2, le=1000)
     minute_bar_refresh_interval_seconds: int = Field(default=60, gt=0)
     cached_bars_max_age_seconds: int = Field(default=120, ge=0)
-    max_quote_age_seconds: int = Field(default=15, gt=0)
+    max_quote_age_seconds: int = Field(default=30, gt=0)
     decision_interval_seconds: int = Field(default=30, gt=0)
+    jev_concurrency: int = Field(default=5, ge=1, le=30)
+    max_jev_age_seconds: int = Field(default=30, gt=0)
+    min_jev_success_ratio: Decimal = Field(default=Decimal("0.5"), gt=0, le=1)
+    consecutive_unhealthy_steps: int = Field(default=3, ge=1)
     alpha_quant: Decimal = Field(default=Decimal("0.4"), ge=Decimal("0"), le=Decimal("1"))
     beta_jev: Decimal = Field(default=Decimal("0.6"), ge=Decimal("0"), le=Decimal("1"))
     quant_lane_weight: Decimal = Field(default=Decimal("0.25"), ge=Decimal("0"), le=Decimal("1"))
@@ -198,6 +202,8 @@ class USScanResult(DomainModel):
     features: Mapping[str, USQuantFeatures] = Field(default_factory=dict)
     lane_membership: Mapping[str, tuple[str, ...]] = Field(default_factory=dict)
     errors: tuple[str, ...] = ()
+    health: Mapping[str, int] = Field(default_factory=dict)
+    opinion_as_of: Mapping[str, datetime] = Field(default_factory=dict)
 
 
 class USPaperStepResult(DomainModel):
@@ -294,6 +300,7 @@ class USUniversePaperRunner:
         self._logger = logger or logging.getLogger("trader_jev.us_paper")
         self._calendar = NasdaqCalendar()
         self._active_market: USMarketSource | None = None
+        self._listings: dict[str, USUniverseListing] = {}
         self._cached_screen: ScreenFetch | None = None
         self._screen_cached_at: datetime | None = None
         self._screen_attempted_at: datetime | None = None
@@ -367,6 +374,7 @@ class USUniversePaperRunner:
             return self._failed_scan(run_id, now, "universe cache is unavailable")
         _, _, listings = latest
         listing_map = {listing.code: listing for listing in listings}
+        self._listings = listing_map
         previous = self.store.load_portfolio(self.config.portfolio_id)
         held_codes = tuple(
             f"US.{symbol}"
@@ -377,6 +385,7 @@ class USUniversePaperRunner:
         screen = ScreenFetch((), 0, False, 0)
         screen_cache_hit = False
         snapshots: Mapping[str, USMarketSnapshot] = {}
+        snapshots_received_at = now
         bars: Mapping[str, tuple[USOHLCVBar, ...]] = {}
         rejected: Mapping[str, tuple[str, ...]] = {}
         ranked: tuple[USRankedCandidate, ...] = ()
@@ -453,6 +462,7 @@ class USUniversePaperRunner:
                 snapshot_codes = list(dict.fromkeys([*union_codes, *held_codes]))
                 if snapshot_codes:
                     snapshots = market.fetch_snapshots(snapshot_codes)
+                    snapshots_received_at = self._clock.now()
                 source_error_count = len(market.errors)
                 source_errors = tuple(str(error) for error in market.errors)
                 errors.extend(source_errors)
@@ -598,7 +608,7 @@ class USUniversePaperRunner:
                 run_id=run_id,
                 symbol=row.code,
                 payload=snapshot,
-                recorded_at=now,
+                recorded_at=snapshots_received_at,
             )
             self.store.record(
                 "feature_records",
@@ -688,12 +698,31 @@ class USUniversePaperRunner:
             and (candidate.code in held or candidate.quant_rank <= self.config.jev_candidates)
         ]
         eligible.sort(key=lambda candidate: (candidate.code not in held, candidate.quant_rank))
-        calls = 0
-        for candidate in eligible:
-            if candidate.code not in held and calls >= self.config.jev_candidates:
-                continue
+        client = self._jev_client
+        health = dict.fromkeys(
+            (
+                "jev_requested",
+                "jev_succeeded",
+                "response_invalid",
+                "connection_error",
+                "stale_quote",
+                "threshold_rejected",
+                "opinion_expired",
+                "execution_quote_error",
+            ),
+            0,
+        )
+        opinion_as_of: dict[str, datetime] = {}
+        selected_candidates = [c for c in eligible if c.code in held] + [
+            c for c in eligible if c.code not in held
+        ][: self.config.jev_candidates]
+        semaphore = asyncio.Semaphore(self.config.jev_concurrency)
+
+        async def evaluate(candidate: USRankedCandidate) -> None:
             snapshot = scan.snapshots[candidate.code]
-            if not self._snapshot_fresh(snapshot, scan.as_of):
+            decision_time = self._clock.now()
+            if not self._snapshot_fresh(snapshot, decision_time):
+                health["stale_quote"] += 1
                 self.store.record(
                     "errors",
                     run_id=scan.run_id,
@@ -701,17 +730,20 @@ class USUniversePaperRunner:
                     payload={
                         "stage": "jev",
                         "error_type": "STALE_QUOTE",
-                        "message": "quote is stale",
+                        "message": "market update timestamp exceeds the quote freshness limit",
+                        "quote_update_time": snapshot.update_time,
+                        "observed_age_seconds": stale_seconds(snapshot, decision_time),
+                        "max_age_seconds": self.config.max_quote_age_seconds,
                     },
-                    recorded_at=scan.as_of,
+                    recorded_at=decision_time,
                 )
-                continue
+                return
             request_snapshot = self._decision_snapshot(
                 candidate,
                 snapshot,
                 scan.features[candidate.code],
                 positions,
-                scan.as_of,
+                decision_time,
             )
             request = JevRequest(
                 snapshot_id=request_snapshot.snapshot_id,
@@ -735,50 +767,75 @@ class USUniversePaperRunner:
                 run_id=scan.run_id,
                 symbol=candidate.code,
                 payload=request,
-                recorded_at=scan.as_of,
+                recorded_at=decision_time,
             )
+            health["jev_requested"] += 1
+            raw: Mapping[str, Any] | None = None
             try:
-                raw = await self._jev_client.ask(request, _us_jev_questions())
+                raw = await client.ask(request, _us_jev_questions())
                 opinion = parse_jev_opinion(raw)
             except Exception as exc:
+                error_type = (
+                    "CONNECTION_ERROR" if isinstance(exc, JevHttpError) else "INVALID_RESPONSE"
+                )
+                health[
+                    "connection_error" if isinstance(exc, JevHttpError) else "response_invalid"
+                ] += 1
+                if raw is not None:
+                    self.store.record(
+                        "jev_responses",
+                        run_id=scan.run_id,
+                        symbol=candidate.code,
+                        payload={"raw_response": raw, "parse_error": error_type},
+                        recorded_at=self._clock.now(),
+                    )
                 self.store.record(
                     "errors",
                     run_id=scan.run_id,
                     symbol=candidate.code,
-                    payload={"stage": "jev", "error_type": type(exc).__name__, "message": str(exc)},
-                    recorded_at=scan.as_of,
+                    payload={"stage": "jev", "error_type": error_type, "message": str(exc)},
+                    recorded_at=self._clock.now(),
                 )
-                continue
+                return
+            response_time = self._clock.now()
             opinions[candidate.code] = opinion
+            opinion_as_of[candidate.code] = snapshot.update_time
+            health["jev_succeeded"] += 1
             self.store.record(
                 "jev_responses",
                 run_id=scan.run_id,
                 symbol=candidate.code,
                 payload={"opinion": opinion, "raw_response": raw},
-                recorded_at=scan.as_of,
+                recorded_at=response_time,
             )
             proposed = (
                 USDecisionKind.BUY
                 if self._entry_eligible(opinion, request_snapshot)
                 else USDecisionKind.HOLD
             )
+            reason = self._entry_rejection(opinion, request_snapshot)
+            if reason:
+                health["threshold_rejected"] += 1
             self.store.record(
                 "decisions",
                 run_id=scan.run_id,
                 symbol=candidate.code,
                 payload={
                     "decision": proposed.value,
-                    "reason": "JeV thresholds passed"
-                    if proposed is USDecisionKind.BUY
-                    else "JeV thresholds not met",
+                    "reason": reason or "JeV thresholds passed",
                     "quant_score": candidate.quant_score,
                     "opinion": opinion,
                     "execution": False,
                 },
-                recorded_at=scan.as_of,
+                recorded_at=response_time,
             )
-            if candidate.code not in held:
-                calls += 1
+
+        async def bounded(candidate: USRankedCandidate) -> None:
+            async with semaphore:
+                await evaluate(candidate)
+
+        await asyncio.gather(*(bounded(candidate) for candidate in selected_candidates))
+        scan = scan.model_copy(update={"health": health, "opinion_as_of": opinion_as_of})
         return scan, opinions
 
     async def paper_step(
@@ -847,24 +904,85 @@ class USUniversePaperRunner:
             opinions: Mapping[str, USJevOpinion] = {}
         else:
             scan, opinions = await self.decide(portfolio_override=portfolio)
+        refresh_codes = list(
+            dict.fromkeys(
+                [
+                    *opinions,
+                    *(f"US.{symbol}" for symbol, qty in portfolio.positions.items() if qty > 0),
+                ]
+            )
+        )
+        health = dict(scan.health)
+        health["execution_quote_requested"] = len(refresh_codes)
+        execution_snapshots: Mapping[str, USMarketSnapshot] = {}
+        if refresh_codes:
+            try:
+                with self._market_session() as market:
+                    execution_snapshots = market.fetch_snapshots(refresh_codes)
+            except Exception:
+                # Missing refreshed quotes are counted below; never fall back to old quotes.
+                execution_snapshots = {}
+        now = self._clock.now()
         run_id = scan.run_id
+        for code in refresh_codes:
+            snapshot = execution_snapshots.get(code)
+            if snapshot is None or not self._snapshot_fresh(snapshot, now):
+                health["execution_quote_error"] = health.get("execution_quote_error", 0) + 1
+                self.store.record(
+                    "errors",
+                    run_id=run_id,
+                    symbol=code,
+                    payload={"stage": "execution", "error_type": "EXECUTION_QUOTE_UNAVAILABLE"},
+                    recorded_at=now,
+                )
+            else:
+                self.store.record(
+                    "market_snapshots",
+                    run_id=run_id,
+                    symbol=code,
+                    payload=snapshot,
+                    recorded_at=now,
+                )
+        scan = scan.model_copy(update={"snapshots": execution_snapshots, "health": health})
         ledger = _restore_ledger(portfolio, at=now)
         snapshots_by_symbol: dict[
             str, tuple[USRankedCandidate, DecisionSnapshot, USJevOpinion | None]
         ] = {}
         for candidate in scan.candidates:
             opinion = opinions.get(candidate.code)
+            input_time = scan.opinion_as_of.get(candidate.code)
+            if opinion is not None and (
+                input_time is None
+                or not 0 <= (now - input_time).total_seconds() <= self.config.max_jev_age_seconds
+            ):
+                opinion = None
+                health["opinion_expired"] = health.get("opinion_expired", 0) + 1
+                self.store.record(
+                    "errors",
+                    run_id=run_id,
+                    symbol=candidate.code,
+                    payload={"stage": "execution", "error_type": "OPINION_EXPIRED"},
+                    recorded_at=now,
+                )
             snapshot = scan.snapshots.get(candidate.code)
             feature = scan.features.get(candidate.code)
             symbol = candidate.code.partition(".")[2]
             if (
                 snapshot is None
-                or feature is None
+                or (feature is None and symbol not in portfolio.positions)
                 or (opinion is None and symbol not in portfolio.positions)
             ):
                 continue
             if not self._snapshot_fresh(snapshot, now):
                 continue
+            if feature is None:
+                feature = generate_quant_features(
+                    USScreenRow(
+                        code=candidate.code, name=candidate.name, price=snapshot.last_price
+                    ),
+                    snapshot,
+                    (),
+                )
             decision_snapshot = self._decision_snapshot(
                 candidate, snapshot, feature, portfolio, now
             )
@@ -872,6 +990,17 @@ class USUniversePaperRunner:
             instrument = decision_snapshot.instrument
             ledger.mark(instrument, snapshot.last_price, now)
 
+        scan = scan.model_copy(update={"health": health})
+        self.store.record(
+            "decisions",
+            run_id=run_id,
+            payload={
+                "kind": "runtime_health",
+                "health": health,
+                "unhealthy": self._unhealthy(scan),
+            },
+            recorded_at=now,
+        )
         decision = USDecisionKind.NO_TRADE
         selected: (
             tuple[str, CandidateAction, USRankedCandidate, DecisionSnapshot, USJevOpinion | None]
@@ -921,6 +1050,18 @@ class USUniversePaperRunner:
             )
 
         symbol, action, candidate, decision_snapshot, opinion = selected
+        now = self._clock.now()
+        input_time = scan.opinion_as_of.get(candidate.code)
+        if not self._snapshot_fresh(scan.snapshots[candidate.code], now) or (
+            action is CandidateAction.BUY
+            and (
+                input_time is None
+                or not 0 <= (now - input_time).total_seconds() <= self.config.max_jev_age_seconds
+            )
+        ):
+            return self._record_no_trade(
+                run_id, now, dry_run, "execution_input_expired", portfolio, scan=scan
+            )
         instrument = decision_snapshot.instrument
         requested_quantity = (
             int(ledger.state.positions.get(symbol, 0)) if action is CandidateAction.SELL else None
@@ -1140,6 +1281,7 @@ class USUniversePaperRunner:
         last_result: USPaperStepResult | None = None
         steps_completed = 0
         stop_reason = "step_limit"
+        unhealthy_steps = 0
         with self._market_source_factory() as market:
             self._active_market = market
             try:
@@ -1156,6 +1298,21 @@ class USUniversePaperRunner:
                         usd_jpy_source=usd_jpy_source,
                     )
                     steps_completed += 1
+                    unhealthy_steps = (
+                        unhealthy_steps + 1
+                        if last_result.scan is not None and self._unhealthy(last_result.scan)
+                        else 0
+                    )
+                    if unhealthy_steps >= self.config.consecutive_unhealthy_steps:
+                        self._logger.error(
+                            "Paper runtime unhealthy for %s consecutive steps: %s",
+                            unhealthy_steps,
+                            last_result.scan.health if last_result.scan else {},
+                        )
+                        raise RuntimeError(
+                            f"Paper runtime unhealthy for {unhealthy_steps} consecutive steps; "
+                            f"last_run_id={last_result.run_id}"
+                        )
                     if not until_market_close:
                         results.append(last_result)
                     if steps is not None and steps_completed >= steps:
@@ -1191,24 +1348,49 @@ class USUniversePaperRunner:
             else self.config.estimated_fee_bps
         )
 
+    def _unhealthy(self, scan: USScanResult) -> bool:
+        health = scan.health
+        attempted = health.get("jev_requested", 0) + health.get("stale_quote", 0)
+        usable = max(0, health.get("jev_succeeded", 0) - health.get("opinion_expired", 0))
+        if attempted and Decimal(usable) / attempted < self.config.min_jev_success_ratio:
+            return True
+        quote_requested = health.get("execution_quote_requested", 0)
+        quote_usable = max(0, quote_requested - health.get("execution_quote_error", 0))
+        if (
+            quote_requested
+            and Decimal(quote_usable) / quote_requested < self.config.min_jev_success_ratio
+        ):
+            return True
+        if (
+            self._jev_client is not None
+            and self.config.jev_candidates
+            and scan.candidate_count
+            and not attempted
+        ):
+            return True
+        return not scan.candidate_count and bool(scan.errors)
+
     def _entry_eligible(self, opinion: USJevOpinion, snapshot: DecisionSnapshot) -> bool:
+        return self._entry_rejection(opinion, snapshot) is None
+
+    def _entry_rejection(self, opinion: USJevOpinion, snapshot: DecisionSnapshot) -> str | None:
         if (
             opinion.min_confidence is None
             or opinion.min_confidence < self.config.min_jev_confidence
         ):
-            return False
+            return "confidence_below_threshold"
         if opinion.trade_worthy_probability < self.config.min_trade_worthy_probability:
-            return False
+            return "trade_worthy_below_threshold"
         if opinion.abnormal_probability > self.config.max_abnormal_probability:
-            return False
+            return "abnormal_probability_above_threshold"
         if not snapshot.data_quality.healthy:
-            return False
+            return "unhealthy_quote"
         if (
             snapshot.market.spread / snapshot.market.mid * Decimal("10000")
             > self.config.max_spread_bps
         ):
-            return False
-        return opinion.setup_type != "NO_SETUP"
+            return "spread_above_threshold"
+        return "no_setup" if opinion.setup_type == "NO_SETUP" else None
 
     def _exit_reason(
         self,
@@ -1247,7 +1429,7 @@ class USUniversePaperRunner:
     ) -> DecisionSnapshot:
         code = candidate.code
         symbol = code.partition(".")[2]
-        listing = _listing_from_cache(self.store, code)
+        listing = self._listings.get(code)
         instrument = _instrument(symbol, listing)
         bid = market_snapshot.bid_price or market_snapshot.last_price
         ask = market_snapshot.ask_price or market_snapshot.last_price
@@ -1554,9 +1736,13 @@ def _us_jev_questions() -> dict[str, dict[str, Any]]:
         "trend_quality": {
             "type": "score",
             "instructions": (
-                "Rate the clarity and stability of the five-minute trend from zero to one."
+                "Rate the observed five-minute trend using the three described levels."
             ),
-            "criteria": ["0.0: no usable trend", "0.5: mixed evidence", "1.0: clear stable trend"],
+            "criteria": [
+                "Price repeatedly reverses direction; no sustained five-minute trend is visible.",
+                "Price has a direction but pullbacks or inconsistent volume interrupt the trend.",
+                "Price advances consistently with supporting volume and shallow pullbacks.",
+            ],
         },
         "continuation_quality": {
             "type": "score",
@@ -1564,9 +1750,9 @@ def _us_jev_questions() -> dict[str, dict[str, Any]]:
                 "Rate the odds that the current setup continues over the next five minutes."
             ),
             "criteria": [
-                "0.0: continuation unlikely",
-                "0.5: uncertain",
-                "1.0: strong continuation evidence",
+                "The move is losing volume and failing to hold its recent price level.",
+                "The move holds its level but volume and price direction give mixed evidence.",
+                "The move holds near its high with sustained volume and renewed upward progress.",
             ],
         },
         "abnormal_activity": {
@@ -1603,9 +1789,13 @@ def _score_value(answer: Mapping[str, Any], name: str) -> Decimal:
     if value is None:
         raise ValueError(f"Jev {name} answer has no score")
     parsed = Decimal(str(value))
-    if not parsed.is_finite() or parsed < 0 or parsed > 1:
-        raise ValueError(f"Jev {name} score must be between zero and one")
-    return parsed
+    legend = answer.get("legend")
+    expected_levels = {"0", "1", "2"}
+    if not isinstance(legend, Mapping) or set(cast(Mapping[str, Any], legend)) != expected_levels:
+        raise ValueError(f"Jev {name} score legend must match the requested three levels")
+    if not parsed.is_finite() or parsed < 0 or parsed > 2:
+        raise ValueError(f"Jev {name} score must be between zero and two")
+    return parsed / Decimal("2")
 
 
 def _noul_probability(answer: Mapping[str, Any], name: str) -> Decimal:

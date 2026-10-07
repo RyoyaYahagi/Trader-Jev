@@ -1,6 +1,13 @@
 # JevとVercel AI Gatewayの接続
 
-Trader-JevはTypeSafe公式の`@typesafe-ai/sdk`を使い、Jevの呼び出しだけをVercel AI Gateway経由で実行します。`jev-gateway`のリポジトリやサービス設定は変更しません。このアプリからは新しいGatewayへ直接接続します。
+Trader-JevはJevの呼び出し先を`JEV_TRANSPORT`で選びます。
+
+- `vercel`(既定): TypeSafe公式の`@typesafe-ai/sdk`を使い、Vercel AI Gateway経由で呼び出します。
+- `gateway`: ローカルの`jev-gateway`サービス(`http://127.0.0.1:4789/v1/systemone`)へ送ります。`jev-gateway`がTypeSafeのAPIキーを保持し、TypeSafe APIへ転送します。Trader-JevはTypeSafeのAPIキーを持ちません。`jev-gateway`のリポジトリやサービス設定は変更しません。
+
+Vercel AI Gatewayは無料枠のアカウントでは`liquid/d1`と`jev-latest`のどちらも`403 Free tier users do not have access to this model`を返します(2026/10/3に確認)。有料クレジットがない場合は`gateway`を使ってください。
+
+以下の「セットアップ」と「接続方式」は`vercel`の場合の説明です。
 
 Trader-Jev本体はPython製のCLIです。TypeSafe公式SDKはNode.js用のため、PythonはリクエストをローカルのNode.jsブリッジへ渡します。ブリッジは`TypeSafeClient.systemOne()`を呼び出し、APIキーをサーバー側のプロセス環境にだけ置きます。ブラウザー向けのコードや`NEXT_PUBLIC_AI_GATEWAY_API_KEY`は使いません。
 
@@ -47,9 +54,12 @@ TypeSafe SDKの再試行は無効化します。通信失敗や応答不正は�
 
 | 変数 | 用途 |
 | --- | --- |
+| `JEV_TRANSPORT` | 呼び出し先。`vercel`(既定)または`gateway` |
+| `JEV_GATEWAY_URL` | `gateway`の送信先。既定値は`http://127.0.0.1:4789/v1/systemone`。ループバック以外では`https`が必要 |
+| `JEV_GATEWAY_TOKEN` | `jev-gateway`がBearer認証を要求する場合のトークン |
 | `AI_GATEWAY_API_KEY` | ローカルまたはサーバー環境で使うVercel AI Gateway APIキー |
 | `VERCEL_OIDC_TOKEN` | Vercel実行環境が提供する場合の認証フォールバック |
-| `JEV_MODEL` | TypeSafeモデル名。既定値は`jev-latest` |
+| `JEV_MODEL` | `vercel`で使うモデル名。既定値は`jev-latest`。`gateway`では使わず、`jev-gateway`側の設定モデルを使います |
 | `JEV_TIMEOUT_SECONDS` | SDK呼び出しのタイムアウト秒数。既定値は`5` |
 | `JEV_MAX_RESPONSE_BYTES` | ブリッジ応答の最大サイズ。既定値は`65536` |
 | `JEV_INPUT_PRICE_USD_PER_1K_TOKENS` | 料金推定で使う入力1,000トークンあたりのUSD単価 |
@@ -57,7 +67,9 @@ TypeSafe SDKの再試行は無効化します。通信失敗や応答不正は�
 | `JEV_REQUEST_PRICE_USD` | 料金推定で使う1リクエストあたりの固定料金 |
 | `JEV_PRICE_CURRENCY` | 料金表示の通貨ラベル。既定値は`USD` |
 
-旧設定の`JEV_GATEWAY_URL`、`JEV_GATEWAY_TOKEN`、`JEV_API_KEY`、`TYPESAFE_API_KEY`、`JEV_BASE_URL`、`JEV_ENDPOINT_PATH`は使用しません。TypeSafe APIへの直接接続先やローカルGatewayへ切り替える設定はありません。
+旧設定の`JEV_API_KEY`、`TYPESAFE_API_KEY`、`JEV_BASE_URL`、`JEV_ENDPOINT_PATH`は使用しません。Trader-JevからTypeSafe APIへ直接接続する設定はありません。
+
+`gateway`で通信に失敗した場合、エラーにはHTTPステータスと`jev-gateway`またはTypeSafeが返したエラーコード・メッセージを含めます。トークンやAPIキーは含めません。
 
 Paper CLIは`.env`から`KEY=VALUE`を読み込みます。プロセス環境変数は`.env`より優先します。他のCLIやsystemdサービスでは、同じ変数をプロセス環境へ設定してください。
 

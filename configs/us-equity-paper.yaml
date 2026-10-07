@@ -20,7 +20,7 @@ jev_candidates: 30
 minute_bar_count: 390
 minute_bar_refresh_interval_seconds: 60
 cached_bars_max_age_seconds: 120
-max_quote_age_seconds: 15
+max_quote_age_seconds: 30
 decision_interval_seconds: 30
 quant_lane_weight: 0.25
 alpha_quant: 0.4
@@ -58,3 +58,9 @@ moomoo:
   retry_initial_seconds: 0.5
   minute_bar_count: 390
   minute_bar_type: K_1M
+
+# Runtime health is separate from the trading confidence gate.
+jev_concurrency: 5
+max_jev_age_seconds: 30
+min_jev_success_ratio: 0.5
+consecutive_unhealthy_steps: 3

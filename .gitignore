@@ -1,12 +1,52 @@
-.venv/
+# Python environments, caches and build output
+.venv
 __pycache__/
 .pytest_cache/
 .ruff_cache/
 .pyright/
+.mypy_cache/
+.tox/
+.nox/
 *.py[cod]
 *.egg-info/
+/build/
+/dist/
 .coverage
+.coverage.*
+coverage.xml
 htmlcov/
+
+# Local credentials (keep the configuration template tracked)
 .env
 .env.*
 !.env.example
+/.aws/
+/.ssh/
+/.secrets/
+*.pem
+*.key
+*.p12
+*.pfx
+id_rsa
+id_ed25519
+
+# Market data, ledgers, private Jev artifacts and trained models.
+# No trailing slash: also ignore the runtime clone's data symlink.
+/data
+/var
+/models
+*.sqlite
+*.sqlite-*
+*.sqlite3
+*.sqlite3-*
+*.db
+*.db-*
+*.log
+
+# TypeSafe SDK dependencies and generated bridge
+/jev-sdk/node_modules
+/jev-sdk/dist
+
+# Local operating-system metadata
+.DS_Store
+Thumbs.db

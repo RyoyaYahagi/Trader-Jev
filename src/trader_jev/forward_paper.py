@@ -146,16 +146,6 @@ DEFAULT_CAPITAL_SCENARIOS: tuple[CapitalScenario, ...] = (
         fx_source=DEFAULT_USD_JPY_SOURCE,
     ),
     CapitalScenario(
-        scenario_id="jpy-250k",
-        label="25万制約",
-        initial_capital=_jpy_to_usd(Decimal("250000"), DEFAULT_USD_JPY_RATE),
-        capital_constraint=_jpy_to_usd(Decimal("250000"), DEFAULT_USD_JPY_RATE),
-        jpy_capital=Decimal("250000"),
-        usd_jpy_rate=DEFAULT_USD_JPY_RATE,
-        fx_as_of=DEFAULT_USD_JPY_AS_OF,
-        fx_source=DEFAULT_USD_JPY_SOURCE,
-    ),
-    CapitalScenario(
         scenario_id="jpy-500k",
         label="50万制約",
         initial_capital=_jpy_to_usd(Decimal("500000"), DEFAULT_USD_JPY_RATE),
@@ -430,13 +420,7 @@ class ForwardPaperRunner:
         self._jev_transport: str | None = None
         if self.config.decision_mode is ForwardDecisionMode.JEV:
             client = jev_client or JevHttpClient.from_env()
-            self._jev_transport = (
-                "gateway"
-                if isinstance(client, JevHttpClient) and client.config.gateway_url is not None
-                else "direct"
-                if isinstance(client, JevHttpClient)
-                else "custom"
-            )
+            self._jev_transport = _jev_transport_label(client)
             self._jev_adapter = JevDecisionAdapter(
                 client,
                 config=JevAdapterConfig(
@@ -596,9 +580,7 @@ class ForwardPaperRunner:
                     str(self.config.jpy_capital) if self.config.jpy_capital is not None else None
                 ),
                 "usd_jpy_rate": (
-                    str(self.config.usd_jpy_rate)
-                    if self.config.usd_jpy_rate is not None
-                    else None
+                    str(self.config.usd_jpy_rate) if self.config.usd_jpy_rate is not None else None
                 ),
                 "fx_as_of": self.config.fx_as_of,
                 "fx_source": self.config.fx_source,
@@ -708,9 +690,10 @@ class ForwardPaperRunner:
 
     def _decision_due(self, key: str, now: datetime) -> bool:
         previous = self._last_decision_at.get(key)
-        return previous is None or (
-            now - previous
-        ).total_seconds() >= self.config.decision_cadence_seconds
+        return (
+            previous is None
+            or (now - previous).total_seconds() >= self.config.decision_cadence_seconds
+        )
 
     async def _close_open_positions(self) -> None:
         for symbol, quantity in tuple(self.ledger.state.positions.items()):
@@ -818,9 +801,7 @@ class ParallelForwardPaperRunner:
                 await asyncio.gather(
                     *(runner.process_event(raw_event, now) for runner in self.runners)
                 )
-                processed = processed or any(
-                    runner.events_processed > 0 for runner in self.runners
-                )
+                processed = processed or any(runner.events_processed > 0 for runner in self.runners)
         except asyncio.CancelledError:
             status = "CANCELED"
             raise
@@ -856,7 +837,7 @@ def build_capital_scenarios(
     if not fx_as_of.strip() or not fx_source.strip():
         raise ValueError("fx_as_of and fx_source must not be blank")
     if values is None:
-        values = ("100000", "250000", "500000", "unconstrained")
+        values = ("100000", "500000", "unconstrained")
     unconstrained_cash = (
         _jpy_to_usd(DEFAULT_UNCONSTRAINED_JPY_REFERENCE, usd_jpy_rate)
         if unconstrained_initial_capital is None
@@ -954,8 +935,7 @@ def build_parser() -> argparse.ArgumentParser:
         type=Path,
         default=Path(".env"),
         help=(
-            "Optional JEV env file; process environment variables take precedence "
-            "(default: .env)."
+            "Optional JEV env file; process environment variables take precedence (default: .env)."
         ),
     )
     parser.add_argument(
@@ -1019,7 +999,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--capital-scenarios",
         help=(
             "Comma-separated JPY capital scenarios to run in parallel, such as "
-            "10万,25万,50万,unconstrained."
+            "10万,50万,unconstrained."
         ),
     )
     parser.add_argument(
@@ -1291,6 +1271,14 @@ def _decimal_metadata(metadata: Mapping[str, Any], name: str) -> Decimal | None:
     except (InvalidOperation, TypeError, ValueError):
         return None
     return parsed if parsed.is_finite() and parsed > 0 else None
+
+
+def _jev_transport_label(client: object) -> str:
+    if not isinstance(client, JevHttpClient):
+        return "custom"
+    if client.config.transport == "gateway":
+        return "local_jev_gateway"
+    return "vercel_ai_gateway_typesafe_sdk"
 
 
 def _decimal(value: str) -> Decimal:

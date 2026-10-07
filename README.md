@@ -34,7 +34,7 @@ moomoo APIは市場データ取得に限って使用します。注文・口座�
 - Initial exit: ATR(14) × 1.0 stop、1.5R take-profit、最大保有15分
 - Initial Jev inputs: `TECHNICAL_ONLY` と `MICROSTRUCTURE`（ニュース／MLは初期Forward Paperでは未使用）
 - Autonomous Forward Paper: 新規runは1日2件、同時実行は最大2件
-- Initial universe: 固定10銘柄
+- Nightly U.S. Paper: 全銘柄スクリーニング + Jev選別 + 10万円Paper portfolio。Jev候補判定は30秒ごと、全体スクリーナーは5分ごとに更新 ([docs/US_UNIVERSE_PAPER.md](docs/US_UNIVERSE_PAPER.md))
 - Markets: Japan / US を研究対象とする
 - Direction model: LONG / SHORT / HOLD
 - Execution: PaperBroker only
@@ -43,6 +43,12 @@ moomoo APIは市場データ取得に限って使用します。注文・口座�
 - Main validation: Historical Replay と Paper Trading
 
 初期値は最適値ではなく、`configs/jev-forward-paper-plan.yaml` に登録した比較候補の起点です。SQLite台帳へ候補・試行・失敗・結果を保存し、Jevの入力・正規化済み出力・監査情報も各Paper runのartifactとして残します。現在の自動実行は読み取り専用の市場データ + `PaperBroker` に限ります。
+
+## Branch workflow
+
+統合先は `main` です。最新の `main` から作業ブランチを作り、検証後に `main` 向けのPRで反映します。`develop` は過去の履歴として残します。Paper自動運用のruntime cloneは、[AUTO_REPAIR.md](docs/AUTO_REPAIR.md) に従って検証済みコミットを固定して使用します。
+
+`data/`、`var/`、`models/` はローカルのデータ・実験結果・学習済みモデルの保存先で、Git管理から除外します。認証情報は `.env` に置き、設定例の `.env.example` のみ共有します。
 
 ## Documents
 
@@ -53,11 +59,13 @@ moomoo APIは市場データ取得に限って使用します。注文・口座�
 3. [TRADING_ASSUMPTIONS.md](docs/TRADING_ASSUMPTIONS.md)
 4. [TEST_GATES.md](docs/TEST_GATES.md)
 5. [AGENT_GUIDE.md](docs/AGENT_GUIDE.md)
-6. [JEV_HTTP.md](docs/JEV_HTTP.md)（実Jev HTTP接続を使う場合）
+6. [JEV_HTTP.md](docs/JEV_HTTP.md)（TypeSafe公式SDKとVercel AI Gatewayの設定）
 7. [ML.md](docs/ML.md)（ML学習・LightGBM・Paper利用）
 8. [JQUANTS.md](docs/JQUANTS.md)（J-Quants過去データ取得）
 9. [MOOMOO.md](docs/MOOMOO.md)（OpenDからの読み取り専用リアルタイム株価取得）
 10. [JEV_EXPERIMENTS.md](docs/JEV_EXPERIMENTS.md)（Jev入出力と実験台帳）
+11. [US_UNIVERSE_PAPER.md](docs/US_UNIVERSE_PAPER.md)（米国株ユニバース・Paper運用）
+12. [AUTO_REPAIR.md](docs/AUTO_REPAIR.md)（Codex CLIによる障害時の自動修復）
 
 GitHub Issue #1 をロードマップの起点とします。
 

@@ -91,7 +91,12 @@ class PaperPortfolioPolicy:
 class PortfolioLedger:
     """Append-only order/fill ledger that can rebuild a portfolio state."""
 
-    def __init__(self, initial_state: PortfolioState) -> None:
+    def __init__(
+        self,
+        initial_state: PortfolioState,
+        *,
+        peak_equity: Decimal | None = None,
+    ) -> None:
         initial_capital = initial_state.initial_capital or initial_state.cash
         self._initial_state = initial_state.model_copy(
             update={
@@ -104,7 +109,10 @@ class PortfolioLedger:
         self._order_events: list[OrderEvent] = []
         self._fills: list[FillEvent] = []
         self._events: list[LedgerEvent] = []
-        self._peak_equity = self._state.equity or self._state.cash
+        self._peak_equity = max(
+            self._state.equity or self._state.cash,
+            peak_equity or Decimal("0"),
+        )
 
     @property
     def state(self) -> PortfolioState:

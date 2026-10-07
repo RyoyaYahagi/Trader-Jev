@@ -16,11 +16,14 @@ dependencies = [
     "moomoo-api==10.11.7108",
     "numpy>=1.24,<3",
     "polars>=1.20,<2",
+    # moomoo-api 10.11.7108 still reads FieldDescriptor.label, removed in protobuf 7.34.
+    "protobuf>=3.20.0,<7.34.0",
     "pydantic>=2.8,<3",
     "PyYAML>=6.0,<7",
 ]
 
 [project.scripts]
+trader-jev = "trader_jev.us_paper_cli:main"
 trader-jev-paper = "trader_jev.cli:main"
 trader-jev-train = "trader_jev.ml_cli:main"
 trader-jev-forward-paper = "trader_jev.forward_paper:main"

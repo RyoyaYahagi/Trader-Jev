@@ -49,6 +49,7 @@ class UniverseDashboardStore:
             "screening_rows": [],
             "analysis_rows": [],
             "latest_activity": None,
+            "runtime_health": None,
         }
         try:
             with self._connect() as db:
@@ -57,6 +58,7 @@ class UniverseDashboardStore:
                 result["available"] = True
                 result["universe"] = self._universe_summary(db)
                 result["latest_activity"] = self._latest_activity(db)
+                result["runtime_health"] = self._runtime_health(db)
                 scan = db.execute(
                     """SELECT run_id, MAX(recorded_at) AS recorded_at
                        FROM screening_results GROUP BY run_id
@@ -341,6 +343,35 @@ class UniverseDashboardStore:
         }
 
     @staticmethod
+    def _runtime_health(db: sqlite3.Connection) -> dict[str, Any] | None:
+        for recorded_at, raw in db.execute(
+            "SELECT recorded_at, payload_json FROM decisions "
+            "WHERE symbol IS NULL ORDER BY rowid DESC LIMIT 50"
+        ):
+            payload = _mapping(raw)
+            if payload.get("kind") == "runtime_health":
+                health = _mapping(payload.get("health"))
+                return {
+                    "recorded_at": str(recorded_at),
+                    "unhealthy": payload.get("unhealthy") is True,
+                    "counts": {
+                        key: _integer(health.get(key), 0)
+                        for key in (
+                            "jev_requested",
+                            "jev_succeeded",
+                            "response_invalid",
+                            "connection_error",
+                            "stale_quote",
+                            "threshold_rejected",
+                            "opinion_expired",
+                            "execution_quote_error",
+                            "execution_quote_requested",
+                        )
+                    },
+                }
+        return None
+
+    @staticmethod
     def _run_summary(db: sqlite3.Connection, run_id: str) -> dict[str, Any]:
         row = db.execute(
             """SELECT payload_json FROM run_summaries WHERE run_id = ?
@@ -421,6 +452,10 @@ class UniverseDashboardStore:
                     "jev_requested": request is not None,
                     "jev_recorded_at": (_string(response.get("recorded_at")) if response else None),
                     "setup_type": _string(opinion.get("setup_type")),
+                    "min_confidence": _decimal(opinion.get("min_confidence")),
+                    "setup_confidence": _decimal(opinion.get("setup_confidence")),
+                    "trend_confidence": _decimal(opinion.get("trend_confidence")),
+                    "continuation_confidence": _decimal(opinion.get("continuation_confidence")),
                     "trend_quality": _decimal(opinion.get("trend_quality")),
                     "continuation_quality": _decimal(opinion.get("continuation_quality")),
                     "abnormal_probability": _decimal(opinion.get("abnormal_probability")),
@@ -428,9 +463,9 @@ class UniverseDashboardStore:
                     "jev_score": _decimal(opinion.get("jev_score")),
                     "decision": _string(decision_payload.get("decision")),
                     "reason_code": _string(
-                        decision_payload.get("reason")
+                        error_payload.get("error_type")
+                        or decision_payload.get("reason")
                         or decision_payload.get("risk_reason")
-                        or error_payload.get("error_type")
                     ),
                     "recorded_at": str(recorded_at),
                 }

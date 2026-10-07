@@ -1590,7 +1590,15 @@ function decisionReasonLabel(reason) {
     outside_regular_us_equity_session: '米国株の通常取引時間外',
     'JeV thresholds passed': 'Jevの基準を満たしました',
     'JeV thresholds not met': 'Jevの基準を満たしませんでした',
-    JevHttpError: 'Jevとの通信エラー',
+    JevHttpError: 'Jevとの通信エラー', CONNECTION_ERROR: 'Jevとの通信エラー',
+    INVALID_RESPONSE: 'Jevの応答形式が不正', STALE_QUOTE: '判断入力の価格が期限切れ',
+    OPINION_EXPIRED: 'Jev判断の有効期限切れ',
+    EXECUTION_QUOTE_UNAVAILABLE: '判断後の価格更新に失敗',
+    confidence_below_threshold: '信頼度が基準未満',
+    trade_worthy_below_threshold: '売買適性が基準未満',
+    abnormal_probability_above_threshold: '異常確率が基準超過',
+    unhealthy_quote: '価格情報が不健全', spread_above_threshold: 'スプレッドが基準超過',
+    no_setup: 'セットアップなし',
   })[reason] || '詳細記録あり';
 }
 function setupLabel(value) {
@@ -1666,7 +1674,10 @@ function renderUniverse(data) {
   const runNote = screen
     ? `保存件数 ${integer(screen.stored_count)}件 · 条件通過 ${integer(screen.screened_count)}件 · 条件除外 ${integer(screen.hard_filter_rejected_count)}件${screen.invalid_record_count ? ` · 読み取れない記録 ${integer(screen.invalid_record_count)}件` : ''}`
     : '';
-  $('screen-run-note').textContent = runNote;
+  const health = data.runtime_health;
+  const counts = health?.counts;
+  const healthNote = counts ? ` · 判断状態 ${health.unhealthy ? '障害' : '正常'} · Jev正常 ${integer(counts.jev_succeeded)}/${integer(counts.jev_requested)}件 · 通信失敗 ${integer(counts.connection_error)}件 · 応答不正 ${integer(counts.response_invalid)}件 · 価格期限切れ ${integer(counts.stale_quote)}件 · 判断期限切れ ${integer(counts.opinion_expired)}件 · 価格更新失敗 ${integer(counts.execution_quote_error)}件 · 条件未達 ${integer(counts.threshold_rejected)}件` : '';
+  $('screen-run-note').textContent = runNote + healthNote;
   if (previousRunId !== screen?.run_id) universeScreenPage = 0;
   updateScreenTable();
   loadMasterListings();
@@ -1766,11 +1777,11 @@ function renderAnalysis(data) {
       integer(row.quant_rank), [row.symbol || '—', 'symbol'], row.name || '—', probability(row.quant_score), [lanes, 'lane-list'],
       [jevState, row.setup_type ? 'pill accent' : row.jev_requested ? 'pill warn' : 'pill'], probability(row.trend_quality), probability(row.continuation_quality),
       probability(row.trade_worthy_probability), probability(row.abnormal_probability),
-      probability(row.jev_score), [action, row.decision === 'BUY' ? 'pill good' : row.decision === 'SELL' ? 'pill bad' : row.decision ? 'pill' : ''], reason,
+      probability(row.jev_score), probability(row.setup_confidence), probability(row.trend_confidence), probability(row.continuation_confidence), [action, row.decision === 'BUY' ? 'pill good' : row.decision === 'SELL' ? 'pill bad' : row.decision ? 'pill' : ''], reason,
     ];
   });
   $('analysis-table').replaceChildren(table(
-    ['順位', '銘柄コード', '企業名', '定量評価', '候補区分', 'Jevの型', 'トレンド品質', '継続性', '売買適性', '異常確率', 'Jev評価', '判断', '理由'],
+    ['順位', '銘柄コード', '企業名', '定量評価', '候補区分', 'Jevの型', 'トレンド品質', '継続性', '売買適性', '異常確率', 'Jev評価', '型の信頼度', 'トレンドの信頼度', '継続性の信頼度', '判断', '理由'],
     rows,
     '分析対象の候補はありません',
   ));

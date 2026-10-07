@@ -5,6 +5,8 @@ product and architecture decisions live in `README.md` and `docs/`.
 
 ## Branch strategy
 
+- Use `main` as the integration branch and target new pull requests at `main`.
+  `develop` is retained as historical reference; new work branches from `main`.
 - Never develop directly on `main`.
 - Use one branch for one GitHub Issue or one clearly bounded vertical slice.
 - Name issue branches `codex/issue-<number>-<short-slug>`.

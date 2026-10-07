@@ -1,0 +1,11 @@
+[Unit]
+Description=Start Trader-Jev all-universe paper at NASDAQ open
+
+[Timer]
+OnCalendar=Mon..Fri *-*-* 09:30:00 America/New_York
+Unit=trader-jev-forward-paper.service
+Persistent=false
+AccuracySec=1s
+
+[Install]
+WantedBy=timers.target

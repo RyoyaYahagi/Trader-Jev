@@ -106,3 +106,23 @@ def test_performance_omits_return_when_starting_capital_is_zero(tmp_path: Path) 
 
     assert performance["available"] is True
     assert performance["return_ratio"] is None
+
+
+def test_runtime_health_exposes_counts_without_raw_error_details(tmp_path: Path) -> None:
+    path = tmp_path / "paper.sqlite3"
+    store = USUniversePaperStore(path)
+    store.record(
+        "decisions",
+        run_id="health-test",
+        payload={
+            "kind": "runtime_health",
+            "unhealthy": True,
+            "health": {"jev_requested": 30, "jev_succeeded": 0, "response_invalid": 30},
+            "raw_error": "private upstream details",
+        },
+        recorded_at=datetime(2026, 10, 6, 14, tzinfo=UTC),
+    )
+    result = UniverseDashboardStore(path).snapshot()
+    assert result["runtime_health"]["unhealthy"] is True
+    assert result["runtime_health"]["counts"]["response_invalid"] == 30
+    assert "private upstream details" not in str(result)

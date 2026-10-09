@@ -33,6 +33,11 @@ DecisionSnapshot
 
 米国株の夜間定期実行には、`USUniversePaperRunner`を使う。銘柄情報とスクリーナー結果から候補を絞り、snapshotと購読済み1分足を使って特徴を作り、Jev判断をRiskEngine経由でPaperBrokerへ渡す。この経路も証券APIによる発注・口座照会を含まない。固定10銘柄のForward Paper設定は比較実験や手動実行用に残す。
 
+米国株Paperの比較実験では、`us-equity-atomic-2.0` の独立した質問を選択できる。
+`us_jev_context` が確定した短期履歴と数量・コストの試算を作り、runnerが必須回答・
+データ充足・既存閾値を決定論的に評価する。質問・入力の版と生応答を保存し、
+注文は引き続きRiskEngineを通す。旧質問セットを既定値として保持する。
+
 ## 2. Broker API policy
 
 kabuステーションAPIは現在使用しない。moomoo APIは`MoomooMarketDataAdapter`から市場データを読み取る用途に限って使用する。

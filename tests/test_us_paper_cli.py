@@ -21,6 +21,7 @@ from trader_jev.us_equity import (
     USUniverseListing,
     USUniversePaperStore,
 )
+from trader_jev.us_jev_context import ATOMIC_QUESTION_SET
 from trader_jev.us_moomoo import ScreenFetch, USMoomooError
 from trader_jev.us_paper_cli import (
     USPaperConfig,
@@ -1049,3 +1050,138 @@ async def test_expired_jev_does_not_block_timed_exit(tmp_path: Path) -> None:
     assert result.decision is USDecisionKind.SELL
     assert result.scan is not None
     assert result.scan.health["opinion_expired"] == 1
+
+
+class _AtomicJevClient(_FakeJevClient):
+    async def ask(
+        self,
+        request: Any,
+        questions: Mapping[str, Mapping[str, Any]],
+    ) -> Mapping[str, Any]:
+        assert set(questions) == {
+            "setup_type",
+            "trend_quality",
+            "continuation_quality",
+            "abnormal_activity",
+            "trade_worthy",
+            "volume_support",
+            "pullback_quality",
+        }
+        self.requests.append(request)
+        self.calls += 1
+        return _atomic_response()
+
+
+def _atomic_response() -> dict[str, Any]:
+    response = _jev_response()
+    for key in ("volume_support", "pullback_quality"):
+        response["answers"][key] = dict(response["answers"]["trend_quality"])
+    return response
+
+
+class _AtomicMarketSource(_FakeMarketSource):
+    def fetch_minute_bars(
+        self,
+        codes: Sequence[str],
+        *,
+        count: int | None = None,
+    ) -> Mapping[str, tuple[USOHLCVBar, ...]]:
+        del count
+        bars = tuple(
+            USOHLCVBar(
+                timestamp=NOW - timedelta(minutes=i),
+                open=Decimal("20"),
+                high=Decimal("20"),
+                low=Decimal("20"),
+                close=Decimal("20"),
+                volume=Decimal("1000"),
+                turnover=Decimal("20000"),
+            )
+            for i in range(11, -1, -1)
+        )
+        return {code: bars for code in codes}
+
+
+@pytest.mark.parametrize("key", ["volume_support", "pullback_quality"])
+@pytest.mark.parametrize("failure", ["missing", "confidence", "out_of_range", "type"])
+def test_atomic_response_rejects_missing_or_invalid_answers(key: str, failure: str) -> None:
+    response = _atomic_response()
+    if failure == "missing":
+        del response["answers"][key]
+    elif failure == "confidence":
+        del response["answers"][key]["confidence"]
+    elif failure == "type":
+        response["answers"][key]["type"] = "noul"
+    else:
+        response["answers"][key]["score"] = 3
+    with pytest.raises(ValueError):
+        parse_jev_opinion(
+            response, question_set_version=ATOMIC_QUESTION_SET, evidence_complete=True
+        )
+
+
+def test_atomic_confidence_includes_new_independent_answers() -> None:
+    response = _atomic_response()
+    response["answers"]["volume_support"]["confidence"] = 0.2
+    opinion = parse_jev_opinion(
+        response,
+        question_set_version=ATOMIC_QUESTION_SET,
+        evidence_complete=True,
+    )
+    assert opinion.volume_support == Decimal("0.9")
+    assert opinion.pullback_quality == Decimal("0.9")
+    assert opinion.min_confidence == Decimal("0.2")
+
+
+def test_atomic_response_rejects_unrequested_setup() -> None:
+    response = _atomic_response()
+    response["answers"]["setup_type"]["choice"] = "SELL"
+    with pytest.raises(ValueError, match="unsupported choice"):
+        parse_jev_opinion(response, question_set_version=ATOMIC_QUESTION_SET)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("history_available", [True, False])
+async def test_atomic_paper_path_requires_closed_history_and_preserves_risk_route(
+    tmp_path: Path,
+    history_available: bool,
+) -> None:
+    config = _config(tmp_path / "paper.sqlite3").model_copy(
+        update={
+            "jev_question_set_version": ATOMIC_QUESTION_SET,
+            "minute_bar_candidates": 1,
+        }
+    )
+    source = _AtomicMarketSource() if history_available else _FakeMarketSource()
+    jev = _AtomicJevClient()
+    runner = USUniversePaperRunner(
+        config,
+        USUniversePaperStore(config.database_path),
+        market_source_factory=lambda: source,
+        jev_client=jev,
+        clock=FixedClock(NOW),
+    )
+    result = await runner.paper_step(dry_run=True)
+    assert result.status == ("FILLED" if history_available else "NO_TRADE")
+    assert result.scan is not None
+    request = jev.requests[0]
+    assert request.input_schema_version == "us-equity-2.0"
+    assert request.payload["question_set_version"] == ATOMIC_QUESTION_SET
+    assert request.payload["execution"]["planned_quantity"] > 0
+    assert Decimal(request.payload["execution"]["flat_price_round_trip_cost_bps"]) > 0
+    if history_available:
+        assert len(request.payload["evidence"]["bars"]) == 11
+        assert all(
+            datetime.fromisoformat(bar["timestamp"]) + timedelta(minutes=1) <= request.as_of
+            for bar in request.payload["evidence"]["bars"]
+        )
+        assert result.portfolio is not None
+        assert result.portfolio.total_fees_usd > 0
+        assert (
+            request.payload["execution"]["planned_quantity"] == result.portfolio.positions["AAPL"]
+        )
+    else:
+        assert request.payload["evidence"]["return_5m"] is None
+        assert result.scan.health["threshold_rejected"] == 1
+    assert result.scan.health["response_invalid"] == 0
+    assert result.scan.health["jev_succeeded"] == 1

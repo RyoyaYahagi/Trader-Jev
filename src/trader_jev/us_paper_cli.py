@@ -9,7 +9,7 @@ import logging
 import os
 from collections.abc import Callable, Generator, Mapping, Sequence
 from contextlib import AbstractContextManager, contextmanager
-from datetime import UTC, date, datetime, time
+from datetime import UTC, date, datetime, time, timedelta
 from decimal import ROUND_DOWN, Decimal, InvalidOperation
 from enum import StrEnum
 from pathlib import Path
@@ -63,6 +63,14 @@ from trader_jev.us_equity import (
     rank_quant_candidates,
     stale_seconds,
 )
+from trader_jev.us_jev_context import (
+    ATOMIC_QUESTION_SET,
+    LEGACY_QUESTION_SET,
+    USJevQuestionSet,
+    atomic_questions,
+    execution_context,
+    short_history,
+)
 from trader_jev.us_moomoo import (
     MoomooUSMarketAdapter,
     ScreenFetch,
@@ -76,6 +84,8 @@ MARKET_SYMBOL = "US"
 
 class USPaperConfig(DomainModel):
     """File-based settings for universe discovery, screening and paper sizing."""
+
+    jev_question_set_version: USJevQuestionSet = LEGACY_QUESTION_SET
 
     database_path: Path = Path("data/us_equity_paper.sqlite3")
     include_etf: bool = False
@@ -601,7 +611,18 @@ class USUniversePaperRunner:
                     interval="1m",
                     cached_at=now,
                 )
-            feature = generate_quant_features(row, snapshot, bars_for_code)
+            feature_bars = bars_for_code
+            if self.config.jev_question_set_version == ATOMIC_QUESTION_SET:
+                feature_bars = tuple(
+                    bar
+                    for bar in bars_for_code
+                    if bar.timestamp + timedelta(minutes=1) <= snapshot.update_time
+                )
+            feature = generate_quant_features(row, snapshot, feature_bars)
+            if self.config.jev_question_set_version == ATOMIC_QUESTION_SET:
+                feature = feature.model_copy(
+                    update={"short_history": short_history(bars_for_code, snapshot.update_time)}
+                )
             features[row.code] = feature
             self.store.record(
                 "market_snapshots",
@@ -745,14 +766,61 @@ class USUniversePaperRunner:
                 positions,
                 decision_time,
             )
+            feature = scan.features[candidate.code]
+            version = self.config.jev_question_set_version
+            features_payload = feature.model_dump(mode="json", exclude={"short_history"})
+            extra_context: dict[str, Any] = {"question_set_version": version}
+            evidence_complete = True
+            if version == ATOMIC_QUESTION_SET:
+                evidence = feature.short_history
+                costs = execution_context(
+                    snapshot,
+                    request_snapshot.instrument,
+                    positions,
+                    max_position_pct=self.config.max_position_pct,
+                    slippage_bps=self.config.slippage_bps,
+                    estimated_fee_bps=self._estimated_fee_bps,
+                    fee_schedule=self.config.fee_schedule,
+                    fee_bps=self.config.fee_bps,
+                )
+                evidence_complete = bool(
+                    evidence is not None
+                    and evidence.return_5m is not None
+                    and evidence.volume_recent_to_previous_ratio is not None
+                    and costs["cost_status"] == "ESTIMATED_AT_UNCHANGED_QUOTE"
+                )
+                extra_context.update(
+                    evidence=evidence.model_dump(mode="json") if evidence else None,
+                    execution=costs,
+                    feature_definitions={
+                        "returns_and_distances": "Decimal fractions: 0.01 means 1 percent.",
+                        "bars": "Fully closed 1-minute bars; timestamp is interval start in UTC.",
+                        "volumes": "Shares; compare adjacent closed 5-minute windows.",
+                        "realized_volatility": (
+                            "Sqrt sum squared log returns across available session bars."
+                        ),
+                        "short_term_trend_strength": (
+                            "15-minute return divided by available-session volatility."
+                        ),
+                        "cost_bps": (
+                            "Basis points: 100 bps means 1 percent; unchanged-quote estimate."
+                        ),
+                        "missing_values": (
+                            "Null is unavailable evidence, never zero or an observed anomaly."
+                        ),
+                    },
+                )
             request = JevRequest(
                 snapshot_id=request_snapshot.snapshot_id,
                 market=MARKET_SYMBOL,
                 symbol=candidate.code.partition(".")[2],
                 as_of=snapshot.update_time,
-                input_schema_version="us-equity-1.0",
+                input_schema_version=(
+                    "us-equity-2.0" if version == ATOMIC_QUESTION_SET else "us-equity-1.0"
+                ),
                 payload={
-                    "features": scan.features[candidate.code].model_dump(mode="json"),
+                    **extra_context,
+                    "features": features_payload,
                     "quant_score": str(candidate.quant_score),
                     "lane_scores": {
                         key: str(value) for key, value in candidate.lane_scores.items()
@@ -772,8 +840,13 @@ class USUniversePaperRunner:
             health["jev_requested"] += 1
             raw: Mapping[str, Any] | None = None
             try:
-                raw = await client.ask(request, _us_jev_questions())
-                opinion = parse_jev_opinion(raw)
+                questions = (
+                    atomic_questions() if version == ATOMIC_QUESTION_SET else _us_jev_questions()
+                )
+                raw = await client.ask(request, questions)
+                opinion = parse_jev_opinion(
+                    raw, question_set_version=version, evidence_complete=evidence_complete
+                )
             except Exception as exc:
                 error_type = (
                     "CONNECTION_ERROR" if isinstance(exc, JevHttpError) else "INVALID_RESPONSE"
@@ -1374,6 +1447,8 @@ class USUniversePaperRunner:
         return self._entry_rejection(opinion, snapshot) is None
 
     def _entry_rejection(self, opinion: USJevOpinion, snapshot: DecisionSnapshot) -> str | None:
+        if opinion.question_set_version == ATOMIC_QUESTION_SET and not opinion.evidence_complete:
+            return "insufficient_atomic_evidence"
         if (
             opinion.min_confidence is None
             or opinion.min_confidence < self.config.min_jev_confidence
@@ -1668,17 +1743,32 @@ def main(argv: Sequence[str] | None = None) -> int:
         return 2
 
 
-def parse_jev_opinion(response: Mapping[str, Any]) -> USJevOpinion:
+def parse_jev_opinion(
+    response: Mapping[str, Any],
+    *,
+    question_set_version: USJevQuestionSet = LEGACY_QUESTION_SET,
+    evidence_complete: bool = False,
+) -> USJevOpinion:
     answers_value = response.get("answers")
     if not isinstance(answers_value, Mapping):
         raise ValueError("Jev response is missing the answers object")
     answers = cast(Mapping[str, Any], answers_value)
+    if question_set_version == ATOMIC_QUESTION_SET:
+        questions = atomic_questions()
+        for name, question in questions.items():
+            if _answer(answers, name).get("type") != question["type"]:
+                raise ValueError(f"Jev {name} answer has the wrong type")
     setup = _answer(answers, "setup_type")
     trend = _answer(answers, "trend_quality")
     continuation = _answer(answers, "continuation_quality")
     abnormal = _answer(answers, "abnormal_activity")
     trade_worthy = _answer(answers, "trade_worthy")
     setup_value = _choice_value(setup, "setup_type")
+    if (
+        question_set_version == ATOMIC_QUESTION_SET
+        and setup_value not in atomic_questions()["setup_type"]["criteria"]
+    ):
+        raise ValueError("Jev setup_type answer has an unsupported choice")
     setup_probs = _probability_map(setup)
     trend_probs = _probability_map(trend)
     continuation_probs = _probability_map(continuation)
@@ -1686,12 +1776,34 @@ def parse_jev_opinion(response: Mapping[str, Any]) -> USJevOpinion:
     continuation_score = _score_value(continuation, "continuation_quality")
     abnormal_probability = _noul_probability(abnormal, "abnormal_activity")
     trade_probability = _noul_probability(trade_worthy, "trade_worthy")
+    volume = (
+        _answer(answers, "volume_support") if question_set_version == ATOMIC_QUESTION_SET else None
+    )
+    pullback = (
+        _answer(answers, "pullback_quality")
+        if question_set_version == ATOMIC_QUESTION_SET
+        else None
+    )
+    volume_quality = _score_value(volume, "volume_support") if volume is not None else None
+    pullback_quality = _score_value(pullback, "pullback_quality") if pullback is not None else None
+    if question_set_version == ATOMIC_QUESTION_SET:
+        for name, answer in (
+            ("setup_type", setup),
+            ("trend_quality", trend),
+            ("continuation_quality", continuation),
+            ("volume_support", volume),
+            ("pullback_quality", pullback),
+        ):
+            if answer is None or _optional_confidence(answer) is None:
+                raise ValueError(f"Jev {name} answer has no valid confidence")
     confidence_values = [
         value
         for value in (
             _optional_confidence(setup),
             _optional_confidence(trend),
             _optional_confidence(continuation),
+            _optional_confidence(volume) if volume is not None else None,
+            _optional_confidence(pullback) if pullback is not None else None,
         )
         if value is not None
     ]
@@ -1716,6 +1828,14 @@ def parse_jev_opinion(response: Mapping[str, Any]) -> USJevOpinion:
         trade_worthy_probability=trade_probability,
         jev_score=max(Decimal("0"), min(Decimal("1"), jev_score)),
         min_confidence=minimum_confidence,
+        question_set_version=question_set_version,
+        evidence_complete=evidence_complete
+        if question_set_version == ATOMIC_QUESTION_SET
+        else True,
+        volume_support=volume_quality,
+        volume_confidence=_optional_confidence(volume) if volume is not None else None,
+        pullback_quality=pullback_quality,
+        pullback_confidence=_optional_confidence(pullback) if pullback is not None else None,
         raw_response=response,
     )
 

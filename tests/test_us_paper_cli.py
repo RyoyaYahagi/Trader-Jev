@@ -21,7 +21,7 @@ from trader_jev.us_equity import (
     USUniverseListing,
     USUniversePaperStore,
 )
-from trader_jev.us_jev_context import ATOMIC_QUESTION_SET
+from trader_jev.us_jev_context import ATOMIC_QUESTION_SET, REFINED_QUESTION_SET, USJevQuestionSet
 from trader_jev.us_moomoo import ScreenFetch, USMoomooError
 from trader_jev.us_paper_cli import (
     USPaperConfig,
@@ -1102,6 +1102,18 @@ class _AtomicMarketSource(_FakeMarketSource):
         return {code: bars for code in codes}
 
 
+class _ShortAtomicMarketSource(_AtomicMarketSource):
+    def fetch_minute_bars(
+        self,
+        codes: Sequence[str],
+        *,
+        count: int | None = None,
+    ) -> Mapping[str, tuple[USOHLCVBar, ...]]:
+        return {
+            code: bars[1:] for code, bars in super().fetch_minute_bars(codes, count=count).items()
+        }
+
+
 @pytest.mark.parametrize("key", ["volume_support", "pullback_quality"])
 @pytest.mark.parametrize("failure", ["missing", "confidence", "out_of_range", "type"])
 def test_atomic_response_rejects_missing_or_invalid_answers(key: str, failure: str) -> None:
@@ -1142,13 +1154,15 @@ def test_atomic_response_rejects_unrequested_setup() -> None:
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("history_available", [True, False])
+@pytest.mark.parametrize("version", [ATOMIC_QUESTION_SET, REFINED_QUESTION_SET])
 async def test_atomic_paper_path_requires_closed_history_and_preserves_risk_route(
     tmp_path: Path,
     history_available: bool,
+    version: USJevQuestionSet,
 ) -> None:
     config = _config(tmp_path / "paper.sqlite3").model_copy(
         update={
-            "jev_question_set_version": ATOMIC_QUESTION_SET,
+            "jev_question_set_version": version,
             "minute_bar_candidates": 1,
         }
     )
@@ -1165,8 +1179,10 @@ async def test_atomic_paper_path_requires_closed_history_and_preserves_risk_rout
     assert result.status == ("FILLED" if history_available else "NO_TRADE")
     assert result.scan is not None
     request = jev.requests[0]
-    assert request.input_schema_version == "us-equity-2.0"
-    assert request.payload["question_set_version"] == ATOMIC_QUESTION_SET
+    assert request.input_schema_version == (
+        "us-equity-2.1" if version == REFINED_QUESTION_SET else "us-equity-2.0"
+    )
+    assert request.payload["question_set_version"] == version
     assert request.payload["execution"]["planned_quantity"] > 0
     assert Decimal(request.payload["execution"]["flat_price_round_trip_cost_bps"]) > 0
     if history_available:
@@ -1184,4 +1200,29 @@ async def test_atomic_paper_path_requires_closed_history_and_preserves_risk_rout
         assert request.payload["evidence"]["return_5m"] is None
         assert result.scan.health["threshold_rejected"] == 1
     assert result.scan.health["response_invalid"] == 0
+    assert result.scan.health["jev_succeeded"] == 1
+
+
+@pytest.mark.asyncio
+async def test_refined_paper_rejects_missing_previous_price_window(tmp_path: Path) -> None:
+    config = _config(tmp_path / "paper.sqlite3").model_copy(
+        update={
+            "jev_question_set_version": REFINED_QUESTION_SET,
+            "minute_bar_candidates": 1,
+        }
+    )
+    jev = _AtomicJevClient()
+    runner = USUniversePaperRunner(
+        config,
+        USUniversePaperStore(config.database_path),
+        market_source_factory=_ShortAtomicMarketSource,
+        jev_client=jev,
+        clock=FixedClock(NOW),
+    )
+    result = await runner.paper_step(dry_run=True)
+    assert result.status == "NO_TRADE"
+    assert jev.requests[0].payload["evidence"]["return_5m"] == "0"
+    assert jev.requests[0].payload["evidence"]["return_previous_5m"] is None
+    assert result.scan is not None
+    assert result.scan.health["threshold_rejected"] == 1
     assert result.scan.health["jev_succeeded"] == 1

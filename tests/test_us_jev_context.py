@@ -8,7 +8,14 @@ import pytest
 from trader_jev.fees import MoomooFeeSchedule
 from trader_jev.models import InstrumentMetadata, Market, TradingSession
 from trader_jev.us_equity import USMarketSnapshot, USOHLCVBar, USPaperPortfolio
-from trader_jev.us_jev_context import execution_context, short_history
+from trader_jev.us_jev_context import (
+    ATOMIC_QUESTION_SET,
+    REFINED_QUESTION_SET,
+    atomic_questions,
+    evidence_payload,
+    execution_context,
+    short_history,
+)
 
 NOW = datetime(2026, 10, 8, 15, 0, 30, tzinfo=UTC)
 
@@ -54,6 +61,62 @@ def test_zero_volume_baseline_remains_unavailable() -> None:
     history = short_history([bar(i, "20", "100" if i <= 5 else "0") for i in range(10, 0, -1)], NOW)
     assert history.volume_previous_5m == 0
     assert history.volume_recent_to_previous_ratio is None
+
+
+@pytest.mark.parametrize(
+    ("latest", "excursion", "retained"),
+    [
+        (["102", "101", "101", "101", "100.5"], "0.02", "0.25"),
+        (["102", "101", "101", "101", "101"], "0.02", "0.5"),
+        (["102", "101", "101", "101", "101.5"], "0.02", "0.75"),
+        (["102", "101", "101", "101", "99"], "0.02", "0"),
+        (["100", "99", "99", "99", "99"], "0", None),
+    ],
+)
+def test_retention_measures_remaining_gain_against_peak_gain(
+    latest: list[str],
+    excursion: str,
+    retained: str | None,
+) -> None:
+    prices = ["100"] * 6 + latest
+    history = short_history([bar(11 - i, price) for i, price in enumerate(prices)], NOW)
+    assert history.upward_excursion_5m == Decimal(excursion)
+    assert history.retained_upward_progress_fraction_5m == (
+        Decimal(retained) if retained is not None else None
+    )
+    assert history.return_previous_5m == 0
+    assert history.previous_window_direction == "FLAT"
+    assert history.latest_window_direction == (
+        "UP" if Decimal(latest[-1]) > 100 else "DOWN" if Decimal(latest[-1]) < 100 else "FLAT"
+    )
+    assert history.close_above_previous_5m_high == (Decimal(latest[-1]) > 100)
+    assert history.distance_from_previous_5m_high == Decimal(latest[-1]) / 100 - 1
+
+
+def test_previous_return_needs_eleven_closed_prices() -> None:
+    history = short_history([bar(i, "100") for i in range(10, 0, -1)], NOW)
+    assert history.return_5m == 0
+    assert history.return_previous_5m is None
+    assert history.distance_from_previous_5m_high is None
+    assert history.previous_window_direction is None
+    assert history.close_above_previous_5m_high is None
+
+
+def test_revised_evidence_keeps_previous_version_payload_unchanged() -> None:
+    history = short_history([bar(i, str(111 - i)) for i in range(11, 0, -1)], NOW)
+    previous = evidence_payload(history, ATOMIC_QUESTION_SET)
+    revised = evidence_payload(history, REFINED_QUESTION_SET)
+    assert "retained_upward_progress_fraction_5m" not in previous
+    assert "return_previous_5m" not in previous
+    assert revised["retained_upward_progress_fraction_5m"] == "1"
+    assert revised["return_previous_5m"] is not None
+    assert all(revised[key] == value for key, value in previous.items())
+    before = atomic_questions()
+    after = atomic_questions(REFINED_QUESTION_SET)
+    assert {key for key in before if before[key] != after[key]} == {
+        "setup_type",
+        "pullback_quality",
+    }
 
 
 def snapshot() -> USMarketSnapshot:

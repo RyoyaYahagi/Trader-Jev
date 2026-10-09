@@ -11,7 +11,7 @@ from datetime import UTC, date, datetime, time
 from decimal import Decimal, InvalidOperation
 from enum import StrEnum
 from pathlib import Path
-from typing import Any, cast
+from typing import Any, Literal, cast
 from uuid import uuid4
 from zoneinfo import ZoneInfo
 
@@ -154,6 +154,13 @@ class USShortHistory(DomainModel):
     return_5m: Decimal | None = None
     price_efficiency_5m: Decimal | None = None
     max_close_pullback_5m: Decimal | None = None
+    return_previous_5m: Decimal | None = None
+    distance_from_previous_5m_high: Decimal | None = None
+    upward_excursion_5m: Decimal | None = None
+    retained_upward_progress_fraction_5m: Decimal | None = None
+    previous_window_direction: Literal["UP", "DOWN", "FLAT"] | None = None
+    latest_window_direction: Literal["UP", "DOWN", "FLAT"] | None = None
+    close_above_previous_5m_high: bool | None = None
     volume_recent_5m: Decimal | None = None
     volume_previous_5m: Decimal | None = None
     volume_recent_to_previous_ratio: Decimal | None = None

@@ -17,9 +17,29 @@ from trader_jev.us_equity import (
     USShortHistory,
 )
 
-USJevQuestionSet = Literal["us-equity-1.0", "us-equity-atomic-2.0"]
+USJevQuestionSet = Literal["us-equity-1.0", "us-equity-atomic-2.0", "us-equity-atomic-2.1"]
 LEGACY_QUESTION_SET: USJevQuestionSet = "us-equity-1.0"
 ATOMIC_QUESTION_SET: USJevQuestionSet = "us-equity-atomic-2.0"
+REFINED_QUESTION_SET: USJevQuestionSet = "us-equity-atomic-2.1"
+_REFINED_FIELDS = {
+    "return_previous_5m",
+    "distance_from_previous_5m_high",
+    "upward_excursion_5m",
+    "retained_upward_progress_fraction_5m",
+    "previous_window_direction",
+    "latest_window_direction",
+    "close_above_previous_5m_high",
+}
+
+
+def is_atomic_question_set(version: str) -> bool:
+    return version in (ATOMIC_QUESTION_SET, REFINED_QUESTION_SET)
+
+
+def evidence_payload(history: USShortHistory, version: USJevQuestionSet) -> dict[str, Any]:
+    """Keep the 2.0 input contract intact while adding evidence to 2.1."""
+    excluded: set[str] = _REFINED_FIELDS if version == ATOMIC_QUESTION_SET else set()
+    return history.model_dump(mode="json", exclude=excluded)
 
 
 def short_history(bars: Sequence[USOHLCVBar], as_of: datetime) -> USShortHistory:
@@ -54,10 +74,16 @@ def short_history(bars: Sequence[USOHLCVBar], as_of: datetime) -> USShortHistory
         for price in prices:
             peak = max(peak, price)
             pullback = max(pullback, Decimal(1) - price / peak)
+        retained = None
+        if max(prices) > prices[0]:
+            retained = net / (max(prices) - prices[0]) if net > 0 else Decimal(0)
         updates.update(
             return_5m=prices[-1] / prices[0] - 1,
             price_efficiency_5m=abs(net) / path if path else Decimal(0),
             max_close_pullback_5m=pullback,
+            upward_excursion_5m=max(prices) / prices[0] - 1,
+            retained_upward_progress_fraction_5m=retained,
+            latest_window_direction="UP" if net > 0 else "DOWN" if net < 0 else "FLAT",
         )
     if len(recent) >= 10:
         current = sum((bar.volume for bar in recent[-5:]), Decimal(0))
@@ -66,6 +92,20 @@ def short_history(bars: Sequence[USOHLCVBar], as_of: datetime) -> USShortHistory
             volume_recent_5m=current,
             volume_previous_5m=previous,
             volume_recent_to_previous_ratio=current / previous if previous else None,
+        )
+    if len(recent) >= 11:
+        previous_high = max(bar.high for bar in recent[-10:-5])
+        updates.update(
+            return_previous_5m=recent[-6].close / recent[-11].close - 1,
+            distance_from_previous_5m_high=recent[-1].close / previous_high - 1,
+            previous_window_direction=(
+                "UP"
+                if recent[-6].close > recent[-11].close
+                else "DOWN"
+                if recent[-6].close < recent[-11].close
+                else "FLAT"
+            ),
+            close_above_previous_5m_high=recent[-1].close > previous_high,
         )
     return result.model_copy(update=updates)
 
@@ -128,10 +168,12 @@ def execution_context(
     return context
 
 
-def atomic_questions() -> dict[str, dict[str, Any]]:
+def atomic_questions(
+    version: USJevQuestionSet = ATOMIC_QUESTION_SET,
+) -> dict[str, dict[str, Any]]:
     """Every question has an explicit LONG premise and reads evidence in state."""
 
-    return {
+    questions: dict[str, dict[str, Any]] = {
         "setup_type": {
             "type": "choice",
             "instructions": (
@@ -235,3 +277,63 @@ def atomic_questions() -> dict[str, dict[str, Any]]:
             },
         },
     }
+    if version == REFINED_QUESTION_SET:
+        questions["setup_type"] = {
+            "type": "choice",
+            "instructions": (
+                "Classify only the observed LONG price episode in the supplied closed-minute "
+                "window. Code has already compared the prices: read "
+                "evidence.previous_window_direction, evidence.latest_window_direction and "
+                "evidence.close_above_previous_5m_high. UP/DOWN/FLAT describe the two "
+                "adjacent five-minute close changes; the boolean says whether the final "
+                "close is strictly above the earlier window's highest high. "
+                "Use these explicit observations to match the separate cases below. "
+                "Ignore whole-day changes, volume, fees and predictions. A decline in the "
+                "latest window is not an upward reversal, even after an earlier rally. "
+                "This classification describes observed geometry, not a trade permission."
+            ),
+            "criteria": {
+                "MOMENTUM_BREAKOUT": (
+                    "Previous direction is UP or FLAT, latest direction is UP, and "
+                    "close_above_previous_5m_high is true. "
+                    "This window broke above its earlier high."
+                ),
+                "REVERSAL": (
+                    "Previous direction is DOWN and latest direction is UP: an observed "
+                    "upward recovery after a decline, including a recovery above the earlier high."
+                ),
+                "TREND_CONTINUATION": (
+                    "Previous direction is UP, latest direction is UP, and "
+                    "close_above_previous_5m_high is false. This window has no breakout."
+                ),
+                "RANGE": (
+                    "Latest direction is FLAT, or previous direction is FLAT and latest "
+                    "direction is UP with close_above_previous_5m_high false."
+                ),
+                "NO_SETUP": (
+                    "Latest direction is DOWN, or the required two-window evidence "
+                    "is unavailable. There is no supported current LONG episode in this window."
+                ),
+            },
+        }
+        questions["pullback_quality"] = {
+            "type": "score",
+            "instructions": (
+                "Rate only the fraction of the latest five-minute upward excursion retained "
+                "at the final closed price. evidence.upward_excursion_5m is the peak rise "
+                "above the window's first close; evidence.retained_upward_progress_fraction_5m "
+                "is max(final close - first close, 0) divided by (peak close - first close). "
+                "An excursion of zero is an observed absence of an upward move; its null "
+                "retained fraction is not missing price history. Use the stated fraction bands, "
+                "not absolute drawdown size, whole-day returns, volume or predictions."
+            ),
+            "criteria": [
+                "The observed window has no upward excursion, or retains at most one third "
+                "of its peak upward progress at the final close.",
+                "The window has an upward excursion and retains more than one third but "
+                "less than two thirds of its peak upward progress at the final close.",
+                "The window has an upward excursion and retains at least two thirds "
+                "of its peak upward progress at the final close.",
+            ],
+        }
+    return questions

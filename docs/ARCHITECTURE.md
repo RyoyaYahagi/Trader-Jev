@@ -79,6 +79,10 @@ Future only:
 
 Quote / Trade / OrderBook eventをincrementalに処理し、point-in-time featuresを生成する。
 
+米国株の1分足特徴は、snapshot時刻までに確定した当日通常取引時間内の足から作る。
+時間別の変化率は時刻で両端を特定し、足の欠落・重複・古さを経過時間の代わりにしない。
+矛盾する重複足は除外し、不明な値はnullと明示する。
+
 ### PredictionModel
 
 Optional。

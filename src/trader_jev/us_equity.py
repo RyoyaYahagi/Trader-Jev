@@ -7,7 +7,7 @@ import math
 import sqlite3
 from collections.abc import Callable, Generator, Mapping, Sequence
 from contextlib import contextmanager
-from datetime import UTC, date, datetime, time
+from datetime import UTC, date, datetime, time, timedelta
 from decimal import Decimal, InvalidOperation
 from enum import StrEnum
 from pathlib import Path
@@ -777,22 +777,30 @@ def generate_quant_features(
 
     as_of = snapshot.update_time.astimezone(UTC)
     session_date = as_of.astimezone(US_EASTERN).date()
-    ordered = sorted(
-        (
-            bar
-            for bar in bars
-            if bar.timestamp.astimezone(UTC) <= as_of
-            and bar.timestamp.astimezone(US_EASTERN).date() == session_date
-            and time(9, 30) <= bar.timestamp.astimezone(US_EASTERN).time() < time(16, 0)
-        ),
-        key=lambda bar: bar.timestamp,
-    )
-    prices = [bar.close for bar in ordered]
-    returns = [_return(prices[-1], prices[-2])] if len(prices) >= 2 else []
-    ret_1m = returns[-1] if returns else None
-    ret_5m = _lag_return(prices, 5)
-    ret_15m = _lag_return(prices, 15)
-    ret_60m = _lag_return(prices, 60)
+    closed_by_time: dict[datetime, USOHLCVBar] = {}
+    conflicts: set[datetime] = set()
+    for bar in bars:
+        at = bar.timestamp.astimezone(UTC)
+        if (
+            at + timedelta(minutes=1) > as_of
+            or at.astimezone(US_EASTERN).date() != session_date
+            or not time(9, 30) <= at.astimezone(US_EASTERN).time() < time(16, 0)
+        ):
+            continue
+        previous = closed_by_time.get(at)
+        if previous is not None and previous != bar:
+            conflicts.add(at)
+        closed_by_time[at] = bar
+    for at in conflicts:
+        del closed_by_time[at]
+    ordered = [closed_by_time[at] for at in sorted(closed_by_time)]
+    # Candle timestamps are interval starts. The latest usable close is the end
+    # of the preceding minute, not whichever stale record happens to be last.
+    latest_start = as_of.replace(second=0, microsecond=0) - timedelta(minutes=1)
+    ret_1m = _lag_return(closed_by_time, latest_start, 1)
+    ret_5m = _lag_return(closed_by_time, latest_start, 5)
+    ret_15m = _lag_return(closed_by_time, latest_start, 15)
+    ret_60m = _lag_return(closed_by_time, latest_start, 60)
 
     ret_1d = (
         _return(snapshot.last_price, snapshot.prev_close_price)
@@ -829,9 +837,9 @@ def generate_quant_features(
     distance_vwap = _return(snapshot.last_price, vwap)
 
     log_returns: list[float] = []
-    for left, right in zip(prices, prices[1:], strict=False):
-        if left > 0 and right > 0:
-            log_returns.append(math.log(float(right / left)))
+    for left, right in zip(ordered, ordered[1:], strict=False):
+        if right.timestamp - left.timestamp == timedelta(minutes=1):
+            log_returns.append(math.log(float(right.close / left.close)))
     volatility = None
     if log_returns:
         volatility = Decimal(str(math.sqrt(sum(value * value for value in log_returns))))
@@ -859,6 +867,7 @@ def generate_quant_features(
             ("avg_turnover_20d_usd", row.avg_turnover_20d_usd),
             ("intraday_amplitude", amplitude),
             ("realized_volatility", volatility),
+            ("short_term_trend_strength", trend),
             ("distance_from_vwap", distance_vwap),
             ("distance_from_20d_high", distance_20d_high),
             ("distance_from_20d_low", distance_20d_low),
@@ -1007,10 +1016,14 @@ def make_paper_portfolio_from_ledger(
     )
 
 
-def _lag_return(values: Sequence[Decimal], minutes: int) -> Decimal | None:
-    if len(values) <= minutes:
+def _lag_return(
+    bars: Mapping[datetime, USOHLCVBar], latest_start: datetime, minutes: int
+) -> Decimal | None:
+    current = bars.get(latest_start)
+    previous = bars.get(latest_start - timedelta(minutes=minutes))
+    if current is None or previous is None:
         return None
-    return _return(values[-1], values[-minutes - 1])
+    return _return(current.close, previous.close)
 
 
 def _return(current: Decimal, previous: Decimal | None) -> Decimal | None:

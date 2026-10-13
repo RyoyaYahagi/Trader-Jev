@@ -6,6 +6,8 @@ from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
 
+import pytest
+
 from trader_jev.us_equity import (
     USMarketSnapshot,
     USOHLCVBar,
@@ -125,6 +127,64 @@ def test_minute_feature_generation_uses_only_bars_at_or_before_snapshot() -> Non
 
     assert features.return_1m == Decimal("0.1")
     assert features.last_price == snapshot.last_price
+
+
+def test_unfinished_bar_cannot_change_returns_vwap_or_volatility() -> None:
+    row, snapshot = _row("US.AAA"), _snapshot("US.AAA")
+    closed = (_bar(NOW - timedelta(minutes=2), "10"), _bar(NOW - timedelta(minutes=1), "11"))
+    expected = generate_quant_features(row, snapshot, closed)
+    actual = generate_quant_features(row, snapshot, (*closed, _bar(NOW, "200")))
+    assert actual == expected
+
+
+@pytest.mark.parametrize("minutes", [1, 5, 15, 60])
+def test_return_uses_exact_time_horizon_instead_of_record_count(minutes: int) -> None:
+    # Enough records for the old positional calculation, but the intended
+    # comparison minute is absent and an older record must not stand in for it.
+    bars = tuple(
+        _bar(NOW - timedelta(minutes=i + 1), "10" if i else "11")
+        for i in range(minutes + 2)
+        if i != minutes
+    )
+    features = generate_quant_features(_row("US.AAA"), _snapshot("US.AAA"), bars)
+    assert getattr(features, f"return_{minutes}m") is None
+    assert f"return_{minutes}m" in features.unavailable
+
+
+def test_known_endpoints_allow_correct_return_despite_missing_middle_bars() -> None:
+    bars = (_bar(NOW - timedelta(minutes=6), "10"), _bar(NOW - timedelta(minutes=1), "11"))
+    features = generate_quant_features(_row("US.AAA"), _snapshot("US.AAA"), bars)
+    assert features.return_5m == Decimal("0.1")
+    assert features.return_1m is None
+    assert features.realized_volatility is None  # no observed one-minute price change
+
+
+def test_stale_history_is_not_reported_as_current_minute_returns() -> None:
+    bars = tuple(_bar(NOW - timedelta(minutes=i + 2), str(100 + i)) for i in range(62))
+    features = generate_quant_features(_row("US.AAA"), _snapshot("US.AAA"), bars)
+    assert all(getattr(features, f"return_{minutes}m") is None for minutes in (1, 5, 15, 60))
+    assert features.short_term_trend_strength is None
+    assert "short_term_trend_strength" in features.unavailable
+
+
+def test_identical_duplicate_bars_are_counted_once() -> None:
+    row, snapshot = _row("US.AAA"), _snapshot("US.AAA")
+    bars = (_bar(NOW - timedelta(minutes=2), "10"), _bar(NOW - timedelta(minutes=1), "11"))
+    assert generate_quant_features(
+        row, snapshot, (*bars, *reversed(bars))
+    ) == generate_quant_features(row, snapshot, bars)
+
+
+def test_conflicting_duplicate_bar_is_unavailable_in_either_input_order() -> None:
+    row, snapshot = _row("US.AAA"), _snapshot("US.AAA")
+    bars = (
+        _bar(NOW - timedelta(minutes=2), "10"),
+        _bar(NOW - timedelta(minutes=1), "11"),
+        _bar(NOW - timedelta(minutes=1), "200"),
+    )
+    left = generate_quant_features(row, snapshot, bars)
+    right = generate_quant_features(row, snapshot, tuple(reversed(bars)))
+    assert left == right and left.return_1m is None
 
 
 def test_minute_features_use_only_current_regular_session_for_vwap() -> None:

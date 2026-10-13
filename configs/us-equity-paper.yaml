@@ -1,4 +1,5 @@
 # Read-only moomoo U.S. equity research and PaperBroker settings.
+jev_question_set_version: us-equity-1.0
 # Supply a current USD/JPY rate and its provenance before running paper-step.
 database_path: data/us_equity_paper.sqlite3
 include_etf: false

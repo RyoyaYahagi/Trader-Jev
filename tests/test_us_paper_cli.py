@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import sqlite3
 from collections.abc import Mapping, Sequence
 from datetime import datetime, timedelta
 from decimal import Decimal
@@ -12,6 +13,7 @@ from zoneinfo import ZoneInfo
 import pytest
 
 from trader_jev.clock import FixedClock
+from trader_jev.models import FillEvent
 from trader_jev.us_equity import (
     USDecisionKind,
     USMarketSnapshot,
@@ -21,6 +23,8 @@ from trader_jev.us_equity import (
     USUniverseListing,
     USUniversePaperStore,
 )
+from trader_jev.us_exit_replay import read_fills, replay_recorded_exit
+from trader_jev.us_exit_replay_cli import recorded_quotes
 from trader_jev.us_jev_context import ATOMIC_QUESTION_SET, REFINED_QUESTION_SET, USJevQuestionSet
 from trader_jev.us_moomoo import ScreenFetch, USMoomooError
 from trader_jev.us_paper_cli import (
@@ -1226,3 +1230,140 @@ async def test_refined_paper_rejects_missing_previous_price_window(tmp_path: Pat
     assert result.scan is not None
     assert result.scan.health["threshold_rejected"] == 1
     assert result.scan.health["jev_succeeded"] == 1
+
+
+async def _saved_paper_entry(tmp_path: Path) -> tuple[USPaperStepResult, tuple[FillEvent, ...]]:
+    config = _config(tmp_path / "entry.sqlite3")
+    store = USUniversePaperStore(config.database_path)
+    runner = USUniversePaperRunner(
+        config,
+        store,
+        market_source_factory=_market_factory,
+        jev_client=_FakeJevClient(),
+        clock=FixedClock(NOW),
+    )
+    entry = await runner.paper_step(dry_run=True)
+    assert entry.status == "FILLED"
+    return entry, read_fills(store, entry.run_id)
+
+
+@pytest.mark.asyncio
+async def test_exit_replay_horizon_and_costs_use_identical_saved_entry(tmp_path: Path) -> None:
+    entry, fills = await _saved_paper_entry(tmp_path)
+    quote = _snapshot(CODE).model_copy(update={"update_time": NOW + timedelta(seconds=310)})
+    short = await replay_recorded_exit(
+        entry,
+        fills,
+        [quote],
+        _config(tmp_path / "5min.sqlite3").model_copy(update={"max_holding_seconds": 300}),
+    )
+    long = await replay_recorded_exit(entry, fills, [quote], _config(tmp_path / "15min.sqlite3"))
+    assert short.closed and not long.closed
+    assert short.maximum_holding_overshoot_seconds == 10
+    assert long.net_pnl_usd is None
+    assert short.net_pnl_usd is not None and short.net_pnl_usd < 0
+    assert short.fees_usd is not None and short.slippage_cost_usd is not None
+    assert short.gross_quote_pnl_usd is not None
+    assert short.net_pnl_usd == short.gross_quote_pnl_usd - short.fees_usd - short.slippage_cost_usd
+    assert short.attempts[-1].risk_reason == "APPROVED"
+    assert entry.portfolio is not None and entry.portfolio.positions  # immutable original entry
+
+
+@pytest.mark.asyncio
+async def test_exit_replay_tracks_all_partial_sales(tmp_path: Path) -> None:
+    entry, fills = await _saved_paper_entry(tmp_path)
+    quotes = [
+        _snapshot(CODE).model_copy(
+            update={"update_time": NOW + timedelta(seconds=300), "bid_volume": Decimal(1)}
+        ),
+        _snapshot(CODE).model_copy(update={"update_time": NOW + timedelta(seconds=330)}),
+    ]
+    result = await replay_recorded_exit(
+        entry,
+        fills,
+        quotes,
+        _config(tmp_path / "partial.sqlite3").model_copy(update={"max_holding_seconds": 300}),
+    )
+    assert result.closed and len(result.exit_fills) == 2
+    assert result.exit_fills[0].quantity == 1
+    assert sum(f.quantity for f in result.exit_fills) == sum(f.quantity for f in fills)
+    assert result.fees_usd == sum((f.fees for f in (*fills, *result.exit_fills)), Decimal(0))
+
+
+@pytest.mark.asyncio
+async def test_exit_replay_keeps_stop_loss_before_time_exit(tmp_path: Path) -> None:
+    entry, fills = await _saved_paper_entry(tmp_path)
+    quote = _snapshot(CODE).model_copy(
+        update={
+            "update_time": NOW + timedelta(seconds=60),
+            "bid_price": Decimal("19"),
+            "ask_price": Decimal("19.02"),
+            "last_price": Decimal("19.01"),
+        }
+    )
+    result = await replay_recorded_exit(entry, fills, [quote], _config(tmp_path / "stop.sqlite3"))
+    assert result.closed and result.maximum_holding_overshoot_seconds == 0
+    assert result.attempts[0].risk_reason == "APPROVED"
+
+
+@pytest.mark.asyncio
+async def test_exit_replay_keeps_risk_veto_and_reports_unclosed(tmp_path: Path) -> None:
+    entry, fills = await _saved_paper_entry(tmp_path)
+    quote = _snapshot(CODE).model_copy(
+        update={
+            "update_time": NOW + timedelta(seconds=930),
+            "ask_price": Decimal("21"),
+        }
+    )
+    result = await replay_recorded_exit(entry, fills, [quote], _config(tmp_path / "veto.sqlite3"))
+    assert not result.closed and result.net_pnl_usd is None
+    assert result.portfolio.positions
+    assert not result.exit_fills
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "invalid", ["duplicate", "before_entry", "wrong_symbol", "existing_ledger"]
+)
+async def test_exit_replay_rejects_invalid_input(tmp_path: Path, invalid: str) -> None:
+    entry, fills = await _saved_paper_entry(tmp_path)
+    quote = _snapshot(CODE).model_copy(update={"update_time": NOW + timedelta(seconds=900)})
+    quotes = [quote]
+    config = _config(tmp_path / "invalid.sqlite3")
+    if invalid == "duplicate":
+        quotes.append(quote)
+    elif invalid == "before_entry":
+        quotes = [_snapshot(CODE)]
+    elif invalid == "wrong_symbol":
+        quotes = [quote.model_copy(update={"code": "US.OTHER"})]
+    else:
+        config.database_path.touch()
+    with pytest.raises(ValueError):
+        await replay_recorded_exit(entry, fills, quotes, config)
+
+
+@pytest.mark.asyncio
+async def test_exit_quote_reader_excludes_conflicts_without_choosing_last_record(
+    tmp_path: Path,
+) -> None:
+    entry, _ = await _saved_paper_entry(tmp_path)
+    first = _snapshot(CODE).model_copy(update={"update_time": NOW + timedelta(seconds=300)})
+    conflicting = first.model_copy(update={"bid_volume": Decimal(1)})
+    second = first.model_copy(update={"update_time": NOW + timedelta(seconds=600)})
+    duplicate_raw = second.model_copy(update={"raw": {"irrelevant": "changed"}})
+    connection = sqlite3.connect(":memory:")
+    try:
+        connection.execute("CREATE TABLE run_summaries (recorded_at TEXT, payload_json TEXT)")
+        for quote in (first, conflicting, second, duplicate_raw):
+            connection.execute(
+                "INSERT INTO run_summaries VALUES (?,?)",
+                (
+                    quote.update_time.isoformat(),
+                    json.dumps({"snapshots": {CODE: quote.model_dump(mode="json")}}),
+                ),
+            )
+        quotes, excluded = recorded_quotes(connection, entry)
+        assert excluded == 1
+        assert len(quotes) == 1 and quotes[0].update_time == second.update_time
+    finally:
+        connection.close()

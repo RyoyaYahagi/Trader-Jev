@@ -30,6 +30,7 @@ trader-jev-forward-paper = "trader_jev.forward_paper:main"
 trader-jev-experiment-worker = "trader_jev.experiment_worker:main"
 trader-jev-dashboard = "trader_jev.dashboard_server:main"
 trader-jev-experiment = "trader_jev.experiment_cli:main"
+trader-jev-us-exit-replay = "trader_jev.us_exit_replay_cli:main"
 
 [dependency-groups]
 dev = [

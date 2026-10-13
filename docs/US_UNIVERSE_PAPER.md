@@ -105,6 +105,10 @@ Jevには選択型のセットアップ分類、0〜1のトレンド・継続ス
 
 ## moomoo APIの制限
 
+保存した入口から最大保有時間を比較する方法は
+[US_EXIT_REPLAY.md](US_EXIT_REPLAY.md) を参照してください。
+5分先の判断と15分保有の損益を区別し、費用と価格変動の損益を分けて検算します。
+
 - Static infoからU.S.のstock listingを保存し、ETFは設定で追加取得します。ローカルhard filterが取引所、delisting、security type、最低価格、時価総額、平均売買代金、上場日数を再確認します。判定不能な必須値は不適格として記録します。
 - Stock Screener V2は既定300秒ごとに実行します。1ページ最大200件、最大10回/30秒の制限を守ります。`max_screen_rows`に届いたときはtruncatedをsummaryに記録します。
 - Snapshot要求は最大400銘柄/回、最大60回/30秒に制限します。
